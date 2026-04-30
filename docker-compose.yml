@@ -7,20 +7,27 @@ services:
     container_name: warmap-server
     restart: unless-stopped
 
-    # Single port, bound only to the management interface so the service
-    # is only reachable via the LAN -- pfSense HAProxy proxies in from
-    # there.  No public exposure on the host; everything goes through:
+    # Single port on 8000.  Bound to all LAN interfaces (0.0.0.0) so:
+    #   * pfSense HAProxy can reach it at 192.168.10.91:8000 for the
+    #     d4data.live -> on-prem path
+    #   * the operator can hit it directly from any LAN machine for
+    #     dev/debug at <on-prem-ip>:8000 without going through CF
+    #   * a future second NIC (Chelsio at 192.168.10.93) can serve it
+    #     too without a compose change
     #
+    # No public exposure on the box itself -- WAN ingress is firewalled
+    # at pfSense to only accept :443 from Cloudflare's IP ranges.
+    # Auth gating is at the FastAPI layer (X-WarMap-Key required on
+    # every read endpoint), so a wide bind doesn't weaken access
+    # control -- just removes a gratuitous LAN-side restriction.
+    #
+    # Topology:
     #   Internet -> Cloudflare (orange cloud, edge cert) -> pfSense:443
     #     -> HAProxy frontend (Host: d4data.live SNI check)
     #       -> HAProxy backend (HTTP, LAN-internal)
-    #         -> 192.168.10.91:8000  (this server)
-    #
-    # If you ever need to test from another LAN host, change the bind to
-    # "0.0.0.0:8000:8000" or "192.168.10.0/24" -- but the default is
-    # locked to mgmt0 so no surprises.
+    #         -> <on-prem>:8000  (this server, any LAN interface)
     ports:
-      - "192.168.10.91:8000:8000"
+      - "8000:8000"
 
     environment:
       WARMAP_API_KEY:           ${WARMAP_API_KEY:?missing WARMAP_API_KEY}
