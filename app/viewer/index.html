@@ -69,6 +69,15 @@
                     <button id="layers-reset"    type="button">Reset</button>
                 </div>
                 <div id="layer-panel"></div>
+                <!-- Server-ignore-list filter.  Each row is a skin pattern
+                     the admin previously clicked 'Ignore' on.  Toggle to
+                     reveal the actor in the viewer (visual override only;
+                     server still drops it from the merged JSON).  Admin
+                     gets an extra 'remove from server' button per row. -->
+                <div class="layer-section" id="hidden-skins-section">
+                    <h3>Hidden Skins <span id="hidden-skins-count" class="muted"></span></h3>
+                    <div id="hidden-skins-list"></div>
+                </div>
             </div>
 
             <div class="tab-pane" data-tab="uploaders" hidden>

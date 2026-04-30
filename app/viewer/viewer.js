@@ -97,6 +97,24 @@ const S = {
     // applyTierGating() to hide admin-only UI from non-admin users.
     tier:          null,
     userName:      '',
+    // Server's dynamic skin-ignore patterns.  Mirror of /ignore-list,
+    // refreshed on signin + after every "Ignore this skin" click.
+    // Render loop skips actors whose skin matches any of these
+    // (substring), so the bot's hide takes effect INSTANTLY in the
+    // viewer instead of waiting for the next merge cycle to drop the
+    // actor from the JSON.
+    serverIgnorePatterns: [],
+    // Per-skin viewer-side overrides: skins the user has toggled to
+    // 'show in viewer anyway' even though they're in the server
+    // ignore list.  Useful for "I want to see what I'm ignoring"
+    // filter behavior.  Persists in localStorage so the operator's
+    // visibility prefs survive reloads.
+    viewerShowOverrides: (function () {
+        try {
+            const raw = localStorage.getItem('warmap_show_overrides') || '[]';
+            return new Set(JSON.parse(raw));
+        } catch (e) { return new Set(); }
+    })(),
     // Orientation: world-axis -> canvas-axis transform.  D4's coord system
     // doesn't map cleanly to "north up", so we let the user dial it in.
     // rot:   90deg increments clockwise (0|1|2|3)
@@ -352,6 +370,45 @@ function adminFetch(path, init) {
     init.headers = Object.assign({}, init.headers, { 'X-WarMap-Key': S.adminKey });
     init.cache = 'no-store';
     return fetch(path, init);
+}
+
+// ---- Server ignore list mirror -------------------------------------------
+// Pulled from GET /ignore-list and used by both:
+//   * the render loop, to skip actors whose skin matches a pattern
+//     (so 'Ignore this skin' clicks take effect instantly in the
+//     viewer without waiting for the next merge cycle to drop them
+//     from the merged JSON)
+//   * the Layers tab's 'Hidden skins' filter section, which lists
+//     each pattern with a 'show in viewer anyway' toggle and an
+//     admin-only 'remove from server' button.
+async function refreshServerIgnoreList() {
+    try {
+        const r = await getJSON('/ignore-list');
+        S.serverIgnorePatterns = (r && r.patterns) || [];
+        renderHiddenSkinsSection();
+    } catch (e) {
+        // Non-fatal: render still works with the previous list (or [])
+    }
+}
+
+// Returns true if the actor's skin should be hidden from the viewer
+// because the server is ignoring it AND the user hasn't overridden it
+// to 'show anyway' for this session.
+function isHiddenSkin(skin) {
+    if (!skin) return false;
+    if (S.viewerShowOverrides.has(skin)) return false;
+    const patterns = S.serverIgnorePatterns;
+    for (let i = 0; i < patterns.length; i++) {
+        if (skin.indexOf(patterns[i]) !== -1) return true;
+    }
+    return false;
+}
+
+function persistShowOverrides() {
+    try {
+        localStorage.setItem('warmap_show_overrides',
+            JSON.stringify([...S.viewerShowOverrides]));
+    } catch (e) {}
 }
 
 // ---- Sign-in overlay -----------------------------------------------------
@@ -888,6 +945,12 @@ function render() {
         // without needing to land in KIND_CATEGORY explicitly.
         const cat = KIND_CATEGORY[a.kind] || 'other';
         if (layers['actors_' + cat] === false) continue;
+        // Server-ignore-list filter: hide actors whose skin matches any
+        // dynamic-ignore pattern unless the user has clicked 'show in
+        // viewer anyway' for that specific skin.  Provides instant hide
+        // for newly-clicked ignores (before the merger drops them from
+        // the merged JSON on its next cycle).
+        if (isHiddenSkin(a.skin)) continue;
         const t = applyOrient(a.x / cellRes, a.y / cellRes, rawBbox);
         const x = offX + t.x*scale, y = (h - offY) - t.y*scale;
         const style = ACTOR_STYLE[a.kind] || { c:'#999', sym:'?' };
@@ -1229,8 +1292,22 @@ function renderActorPanel() {
                 const j = await r.json();
                 if (status) status.textContent = j.added ? 'added ✓' : 'already ignored';
                 btn.textContent = 'Ignored ✓';
-                // Trigger an immediate re-merge so the user sees the
-                // ignored skin disappear from the map within ~30s.
+                // Instant viewer-side hide: add to the local mirror and
+                // re-render right away.  isHiddenSkin() will start
+                // returning true for this skin so the actor (and any
+                // others with the same skin) disappears from the map
+                // immediately, without waiting for the next merge cycle
+                // to drop them from the JSON.
+                if (S.serverIgnorePatterns.indexOf(skin) === -1) {
+                    S.serverIgnorePatterns.push(skin);
+                }
+                S.selectedActor = null;
+                renderActorPanel();
+                renderHiddenSkinsSection();
+                render();
+                // Also trigger an immediate server re-merge so the
+                // canonical JSON drops it within seconds (rather than
+                // 30s when the next scheduler tick fires).
                 adminFetch('/merge', { method: 'POST' });
             } catch (e) {
                 if (status) status.textContent = 'failed: ' + (e?.message || e);
@@ -1273,6 +1350,76 @@ function setLayer(id, on) {
     const row = document.querySelector(`[data-layer="${id}"]`);
     if (row) row.classList.toggle('disabled', !on);
 }
+// ---- Hidden-skins filter section -----------------------------------------
+// Lives at the bottom of the Layers tab.  Lists every dynamic ignore
+// pattern, with a toggle to override (show in viewer anyway) and an
+// admin-only 'remove from server list' button.
+function renderHiddenSkinsSection() {
+    const list  = document.getElementById('hidden-skins-list');
+    const count = document.getElementById('hidden-skins-count');
+    if (!list) return;
+    const patterns = S.serverIgnorePatterns || [];
+    if (count) count.textContent = patterns.length ? `(${patterns.length})` : '';
+    if (!patterns.length) {
+        list.innerHTML = '<div class="hint muted">No skins ignored yet.  '
+            + 'Click any actor on the map and use "Ignore this skin" '
+            + 'to add patterns here.</div>';
+        return;
+    }
+    const isAdmin = S.tier === 'admin';
+    const rows = patterns.slice().sort().map(p => {
+        const overridden = S.viewerShowOverrides.has(p);
+        const checked   = !overridden;
+        const removeBtn = isAdmin
+            ? `<button class="hidden-skin-remove" data-pat="${esc(p)}"
+                       title="Remove from server's ignore list (un-ignore everywhere)">✕</button>`
+            : '';
+        return `<label class="layer-row${overridden ? '' : ' disabled'}" data-skin-pat="${esc(p)}">
+            <input type="checkbox" data-hidden-skin="${esc(p)}" ${checked ? 'checked' : ''}>
+            <span class="lbl"><code>${esc(p)}</code>${overridden ? '<span class="sub">(showing)</span>' : ''}</span>
+            ${removeBtn}
+        </label>`;
+    }).join('');
+    list.innerHTML = rows;
+    list.querySelectorAll('input[data-hidden-skin]').forEach(inp => {
+        inp.addEventListener('change', () => {
+            const pat = inp.dataset.hiddenSkin;
+            if (inp.checked) {
+                // Checked = "hide" (the default state); remove from
+                // overrides so the filter applies again.
+                S.viewerShowOverrides.delete(pat);
+            } else {
+                // Unchecked = "show in viewer anyway".
+                S.viewerShowOverrides.add(pat);
+            }
+            persistShowOverrides();
+            renderHiddenSkinsSection();
+            render();
+        });
+    });
+    list.querySelectorAll('.hidden-skin-remove').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const pat = btn.dataset.pat;
+            if (!confirm(`Remove "${pat}" from the server's ignore list?\n\n` +
+                'The pattern will be dropped server-side -- new actors with this ' +
+                'skin will start appearing again on future recordings.  Existing ' +
+                'merged data is unaffected (the merger already dropped them).')) return;
+            try {
+                const r = await adminFetch('/admin/ignore/' + encodeURIComponent(pat), { method: 'DELETE' });
+                if (!r.ok) { alert('Remove failed: HTTP ' + r.status); return; }
+                S.serverIgnorePatterns = S.serverIgnorePatterns.filter(x => x !== pat);
+                S.viewerShowOverrides.delete(pat);
+                persistShowOverrides();
+                renderHiddenSkinsSection();
+                render();
+            } catch (e) {
+                alert('Remove failed: ' + (e?.message || e));
+            }
+        });
+    });
+}
+
 function renderLayerPanel() {
     const host = document.getElementById('layer-panel');
     if (!host) return;
@@ -1784,6 +1931,7 @@ document.getElementById('zone-download')?.addEventListener('click', async () => 
                 await refreshStatus();
                 await refreshZoneList();
                 if (S.tier === 'admin') await refreshUploaders();
+                refreshServerIgnoreList();   // populate hidden-skins filter
             } catch (e) {
                 // 401 -> attemptSignin path already showed the overlay
                 // via refreshStatus's catch.  For any other error,
