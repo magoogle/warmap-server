@@ -42,7 +42,8 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app.keys import KeyStore
+from app.keys import KeyStore   # legacy fallback for migration only
+from app.db   import DB
 
 # ----- Paths (overridable via env for local dev) ---------------------------
 ROOT      = Path(os.getenv('WARMAP_ROOT', '/data'))
@@ -62,9 +63,108 @@ if not ADMIN_KEY:
     print('WARNING: WARMAP_API_KEY not set; admin endpoints will be unusable.',
           file=sys.stderr)
 
-KEYSTORE = KeyStore(path=ROOT / 'keys' / 'api_keys.json', admin_key=ADMIN_KEY)
+DB_PATH = ROOT / 'warmap.db'
+DBI = DB(DB_PATH)
 QUARANTINE_DIR = ROOT / 'quarantine'
 QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# One-shot migration of the legacy api_keys.json into the keys table.
+# Runs at every startup but is idempotent (UPSERT by name).
+def _migrate_legacy_keys():
+    legacy = ROOT / 'keys' / 'api_keys.json'
+    if not legacy.exists():
+        return
+    try:
+        ks = KeyStore(path=legacy, admin_key=ADMIN_KEY)
+        for k in ks.list_uploader_keys():
+            DBI.upsert_key(
+                name=k.name, key=k.key, tier=k.tier,
+                created_at=k.created_at, last_used=k.last_used,
+                uploads=k.uploads, enabled=k.enabled, note=k.note,
+            )
+        legacy.rename(legacy.with_suffix('.json.migrated'))
+        print(f'[startup] migrated keys from {legacy} -> SQLite')
+    except Exception as e:
+        print(f'[startup] key migration failed: {e}', file=sys.stderr)
+
+
+_migrate_legacy_keys()
+
+
+def _summarize_dump(path: Path) -> dict:
+    """Header + last-sample + counts summary, shaped to fit DB.upsert_session.
+
+    Walks the file once.  Cheap for our typical session sizes (KB-MB range).
+    """
+    name = path.name
+    try:
+        st = path.stat()
+        size = st.st_size
+        mtime = st.st_mtime
+    except OSError:
+        size, mtime = 0, 0.0
+    info: dict = {
+        'name':         name,
+        'client_id':    name.split('__', 1)[0] if '__' in name else 'anon',
+        'session_id':   None,
+        'zone':         None, 'world': None, 'activity': None,
+        'started_at':   None, 'ended_at': None, 'last_sample_t': None,
+        'last_x':       None, 'last_y':   None, 'last_z':   None, 'last_floor': None,
+        'sample_count': 0, 'cell_count': 0, 'actor_count': 0,
+        'complete':     False, 'size': size, 'mtime': mtime,
+    }
+    try:
+        with path.open('r', encoding='utf-8') as f:
+            last_sample = None
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t = o.get('type')
+                if t == 'header':
+                    info['session_id'] = o.get('session_id')
+                    info['zone']       = o.get('zone')
+                    info['world']      = o.get('world')
+                    info['activity']   = o.get('activity_kind')
+                    info['started_at'] = o.get('started_at')
+                elif t == 'sample':
+                    last_sample = o
+                    info['sample_count'] += 1
+                elif t == 'grid_cell':
+                    info['cell_count'] += 1
+                elif t == 'actor':
+                    info['actor_count'] += 1
+                elif t == 'footer':
+                    info['complete'] = True
+                    info['ended_at'] = o.get('ended_at')
+            if last_sample:
+                info['last_x']        = last_sample.get('x')
+                info['last_y']        = last_sample.get('y')
+                info['last_z']        = last_sample.get('z')
+                info['last_floor']    = last_sample.get('floor')
+                info['last_sample_t'] = last_sample.get('t')
+    except OSError:
+        pass
+    return info
+
+
+def _index_existing_dumps():
+    n = 0
+    for p in DUMPS_DIR.glob('*.ndjson'):
+        try:
+            DBI.upsert_session(**_summarize_dump(p))
+            n += 1
+        except Exception:
+            pass
+    if n:
+        print(f'[startup] indexed {n} existing dumps')
+
+_index_existing_dumps()
 
 # ----- Merger import (the same module the local merger uses) ---------------
 # We import lazily so the server starts even if the merger module has a
@@ -95,19 +195,27 @@ _last_merge: dict = {
 
 
 # ----- Helpers -------------------------------------------------------------
-def _check_auth(provided: Optional[str]):
-    """Validate against the keystore.  Returns the KeyRecord (admin or
-    uploader) or raises 401."""
+class _AuthRec:
+    """Minimal shape: name + tier + (raw) key, for endpoints to use."""
+    __slots__ = ('name', 'tier', 'key')
+    def __init__(self, name: str, tier: str, key: str):
+        self.name, self.tier, self.key = name, tier, key
+
+
+def _check_auth(provided: Optional[str]) -> _AuthRec:
+    """Validate against the DB.  Master admin key (env) is recognized
+    directly.  Otherwise look up in the keys table."""
     if not ADMIN_KEY:
         raise HTTPException(503, 'Server is not configured (no admin key set).')
-    rec = KEYSTORE.validate(provided)
-    if not rec:
+    if provided == ADMIN_KEY:
+        return _AuthRec(name='admin', tier='admin', key=provided)
+    row = DBI.find_key_by_secret((provided or '').strip()) if provided else None
+    if not row or not row['enabled']:
         raise HTTPException(401, 'Bad or missing X-WarMap-Key header.')
-    return rec
+    return _AuthRec(name=row['name'], tier=row['tier'], key=row['key'])
 
 
-def _check_admin(provided: Optional[str]):
-    """Like _check_auth but requires the admin tier."""
+def _check_admin(provided: Optional[str]) -> _AuthRec:
     rec = _check_auth(provided)
     if rec.tier != 'admin':
         raise HTTPException(403, 'Admin tier required.')
@@ -125,7 +233,8 @@ def _safe_filename(name: str) -> str:
 
 
 def _run_merge() -> dict:
-    """Run the merger against DUMPS_DIR -> DATA_DIR. Thread-safe."""
+    """Run the merger against DUMPS_DIR -> DATA_DIR.  Also refreshes the
+    SQLite index (sessions table + actors table) from the same scan."""
     if not _merge_lock.acquire(blocking=False):
         return {'skipped': True, 'reason': 'already running'}
     try:
@@ -133,13 +242,15 @@ def _run_merge() -> dict:
         _last_merge['error'] = None
         try:
             merge = _import_merger()
-            # Include in-progress sessions so the live viewer reflects what
-            # the player just walked through, not just what they've finished.
             state = merge.merge_all(DUMPS_DIR, only_complete=False)
             merge.emit_all(state, DATA_DIR, SIDECAR)
             accepted = sum(len(agg.sessions) for agg in state.values())
             _last_merge['accepted'] = accepted
             _last_merge['skipped']  = 0
+
+            # Refresh DB index off the same set of files the merger just read.
+            # Cheap because we're only re-summarising headers + last samples.
+            _refresh_db_from_disk(state)
         except Exception as e:
             _last_merge['error'] = str(e)
             return {'ok': False, 'error': str(e)}
@@ -150,6 +261,53 @@ def _run_merge() -> dict:
         return {'ok': True, 'last_merge': _last_merge.copy()}
     finally:
         _merge_lock.release()
+
+
+def _refresh_db_from_disk(merge_state: dict) -> None:
+    """Update the SQLite index from the freshly merged state.
+
+    sessions table : re-summarise every dump on disk (cheap).
+    actors table   : per-zone, replace from merge_state's aggregated actors
+                     (this is the canonical post-merge result).
+    """
+    # Sessions: walk dumps dir, upsert each
+    seen = set()
+    for p in DUMPS_DIR.glob('*.ndjson'):
+        try:
+            DBI.upsert_session(**_summarize_dump(p))
+            seen.add(p.name)
+        except Exception:
+            pass
+    # Drop sessions whose files were quarantined / deleted
+    existing = {r['name'] for r in DBI.query('SELECT name FROM sessions')}
+    for name in existing - seen:
+        DBI.remove_session(name)
+
+    # Actors: per-zone, replace from merge state
+    for key, agg in merge_state.items():
+        if not getattr(agg, 'actors', None):
+            continue
+        rows = []
+        for actor_key, a in agg.actors.items():
+            rows.append({
+                'skin':    a.skin,
+                'kind':    a.kind,
+                'x':       a.x, 'y': a.y, 'z': a.z,
+                'floor':   a.floor,
+                'type_id': a.type_id,
+                'sno_id':  a.sno_id,
+                'radius':  a.radius,
+                'is_boss': a.is_boss,
+                'is_elite':a.is_elite,
+                'sessions_seen':       len(a.sessions_seen) if hasattr(a, 'sessions_seen') else 0,
+                'total_observations':  getattr(a, 'total_observations', 0),
+                'first_seen_at':       getattr(a, 'first_seen_t', None),
+                'last_seen_at':        None,
+            })
+        try:
+            DBI.replace_actors_for_zone(key, rows)
+        except Exception as e:
+            print(f'[db] actor refresh for {key} failed: {e}', file=sys.stderr)
 
 
 # ----- Background merger loop ---------------------------------------------
@@ -253,99 +411,23 @@ def list_zones():
 # ---------------------------------------------------------------------------
 # Per-uploader / per-session visibility for the live viewer.
 #
-# Filenames on disk are `<client_id>__<session_id>.ndjson` (the upload
-# endpoint enforces this format).  Header line carries zone + activity
-# metadata; the last sample line carries the latest player position so
-# the viewer can plot live tracks.
+# All metadata queries go through the SQLite index now.  The dump files
+# themselves remain the source of truth.
 # ---------------------------------------------------------------------------
 
-def _parse_dump_summary(path) -> dict:
-    """Read header + last sample of an NDJSON dump for a quick summary.
-
-    Avoids loading the whole file: header is line 1; last sample is found
-    by reading the tail and walking backward for a line with type=sample.
-    """
-    name = path.name
-    info = {
-        'name':         name,
-        'client_id':    name.split('__', 1)[0] if '__' in name else 'anon',
-        'size':         path.stat().st_size,
-        'mtime':        path.stat().st_mtime,
-        'zone':         None,
-        'world':        None,
-        'activity':     None,
-        'session_id':   None,
-        'started_at':   None,
-        'last_x':       None,
-        'last_y':       None,
-        'last_z':       None,
-        'last_floor':   None,
-        'last_t':       None,
-        'sample_count': 0,
-        'complete':     False,
-    }
-    try:
-        with path.open('r', encoding='utf-8') as f:
-            first = f.readline()
-            try:
-                h = json.loads(first)
-                if h.get('type') == 'header':
-                    info['zone']       = h.get('zone')
-                    info['world']      = h.get('world')
-                    info['activity']   = h.get('activity_kind')
-                    info['session_id'] = h.get('session_id')
-                    info['started_at'] = h.get('started_at')
-            except json.JSONDecodeError:
-                pass
-        # Tail-scan for last sample + footer detection.
-        # File is small (typically <2 MB); just walk it once.
-        last_sample = None
-        sample_count = 0
-        complete = False
-        with path.open('r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    o = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                t = o.get('type')
-                if t == 'sample':
-                    last_sample = o
-                    sample_count += 1
-                elif t == 'footer':
-                    complete = True
-        if last_sample:
-            info['last_x']     = last_sample.get('x')
-            info['last_y']     = last_sample.get('y')
-            info['last_z']     = last_sample.get('z')
-            info['last_floor'] = last_sample.get('floor')
-            info['last_t']     = last_sample.get('t')
-        info['sample_count'] = sample_count
-        info['complete']     = complete
-    except OSError:
-        pass
-    return info
+def _row_to_dict(r) -> dict:
+    return {k: r[k] for k in r.keys()}
 
 
 @app.get('/dumps')
-def list_dumps():
-    """List every dump file with header + last-sample summary.
-
-    Sorted by mtime descending so newest is first.  Useful for the live
-    viewer: shows who's currently uploading + where they are right now.
-    """
-    files = list(DUMPS_DIR.glob('*.ndjson')) + list(DUMPS_DIR.glob('*.json'))
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    summaries = [_parse_dump_summary(p) for p in files]
-    return {'dumps': summaries, 'count': len(summaries)}
+def list_dumps(client_id: Optional[str] = None, zone: Optional[str] = None,
+               limit: int = 500):
+    rows = DBI.list_sessions(client_id=client_id, zone=zone, limit=limit)
+    return {'dumps': [_row_to_dict(r) for r in rows], 'count': len(rows)}
 
 
 @app.get('/dumps/{name}')
 def get_dump(name: str):
-    """Return the raw NDJSON for a specific dump (live viewer's "trail" mode)."""
     safe = _safe_filename(name)
     if not safe:
         raise HTTPException(400, 'Bad dump name.')
@@ -357,40 +439,18 @@ def get_dump(name: str):
 
 @app.get('/uploaders')
 def list_uploaders():
-    """Aggregate dumps by `client_id` prefix.
-
-    Returns one entry per uploader with: total session count, in-progress
-    count, last-active timestamp (= mtime of the newest dump from them),
-    distinct zones touched, latest position.
-    """
-    files = list(DUMPS_DIR.glob('*.ndjson')) + list(DUMPS_DIR.glob('*.json'))
-    by_client: dict[str, dict] = {}
-    for p in files:
-        cid = p.name.split('__', 1)[0] if '__' in p.name else 'anon'
-        slot = by_client.setdefault(cid, {
-            'client_id':       cid,
-            'sessions':        0,
-            'in_progress':     0,
-            'last_active':     0,
-            'zones':           set(),
-            'newest_dump':     None,
-            'newest_summary':  None,
-        })
-        slot['sessions'] += 1
-        info = _parse_dump_summary(p)
-        if info['zone']:
-            slot['zones'].add(info['zone'])
-        if not info['complete']:
-            slot['in_progress'] += 1
-        if info['mtime'] > slot['last_active']:
-            slot['last_active']    = info['mtime']
-            slot['newest_dump']    = info['name']
-            slot['newest_summary'] = info
+    rows = DBI.list_uploaders()
     out = []
-    for cid, s in by_client.items():
-        s['zones'] = sorted(s['zones'])
-        out.append(s)
-    out.sort(key=lambda s: s['last_active'], reverse=True)
+    for r in rows:
+        zones_csv = r['zones_csv'] or ''
+        zones = sorted({z for z in zones_csv.split(',') if z})
+        out.append({
+            'client_id':    r['client_id'],
+            'sessions':     r['sessions'],
+            'in_progress':  r['in_progress'],
+            'last_active':  r['last_active'],
+            'zones':        zones,
+        })
     return {'uploaders': out, 'count': len(out)}
 
 
@@ -431,8 +491,15 @@ async def upload(
         except Exception as e:
             rejected.append({'name': f.filename, 'reason': str(e)})
 
+    # Record upload events + refresh session index for the new files
+    for a in accepted:
+        DBI.record_upload(name=a['name'], client_id=canonical, bytes_=a['bytes'])
+        try:
+            DBI.upsert_session(**_summarize_dump(DUMPS_DIR / a['name']))
+        except Exception:
+            pass
     if accepted:
-        KEYSTORE.record_upload(rec.key, n_files=len(accepted))
+        DBI.bump_key_uploads(rec.key, len(accepted))
     return {'accepted': accepted, 'rejected': rejected, 'as': canonical}
 
 
@@ -454,18 +521,16 @@ class MintRequest(BaseModel):
 @app.get('/admin/keys')
 def admin_list_keys(x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
     _check_admin(x_warmap_key)
-    return {
-        'keys': [{
-            'name':       k.name,
-            'key':        k.key,
-            'tier':       k.tier,
-            'created_at': k.created_at,
-            'last_used':  k.last_used,
-            'uploads':    k.uploads,
-            'enabled':    k.enabled,
-            'note':       k.note,
-        } for k in KEYSTORE.list_uploader_keys()]
-    }
+    return {'keys': [{
+        'name':       r['name'],
+        'key':        r['key'],
+        'tier':       r['tier'],
+        'created_at': r['created_at'],
+        'last_used':  r['last_used'],
+        'uploads':    r['uploads'],
+        'enabled':    bool(r['enabled']),
+        'note':       r['note'],
+    } for r in DBI.list_keys()]}
 
 
 @app.post('/admin/keys')
@@ -474,17 +539,25 @@ def admin_mint_key(
     x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
 ):
     _check_admin(x_warmap_key)
-    try:
-        rec = KEYSTORE.mint(name=body.name, note=body.note)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {
-        'name':       rec.name,
-        'key':        rec.key,
-        'tier':       rec.tier,
-        'created_at': rec.created_at,
-        'note':       rec.note,
-    }
+    name = (body.name or '').strip()
+    if not name:
+        raise HTTPException(400, 'name required')
+    # Idempotent on name: if a key already exists with this name, return it
+    existing = DBI.query_one('SELECT * FROM keys WHERE name = ?', (name,))
+    if existing:
+        return {
+            'name': existing['name'], 'key': existing['key'],
+            'tier': existing['tier'], 'created_at': existing['created_at'],
+            'note': existing['note'],
+        }
+    import secrets
+    new_key = secrets.token_hex(32)
+    DBI.upsert_key(
+        name=name, key=new_key, tier='uploader',
+        created_at=time.time(), note=body.note,
+    )
+    return {'name': name, 'key': new_key, 'tier': 'uploader',
+            'created_at': time.time(), 'note': body.note}
 
 
 @app.post('/admin/keys/{name}/disable')
@@ -493,10 +566,9 @@ def admin_disable_key(
     x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
 ):
     _check_admin(x_warmap_key)
-    rec = KEYSTORE.set_enabled(name, False)
-    if not rec:
-        raise HTTPException(404, 'No such key.')
-    return {'ok': True, 'name': rec.name, 'enabled': rec.enabled}
+    r = DBI.set_key_enabled(name, False)
+    if not r: raise HTTPException(404, 'No such key.')
+    return {'ok': True, 'name': r['name'], 'enabled': bool(r['enabled'])}
 
 
 @app.post('/admin/keys/{name}/enable')
@@ -505,10 +577,9 @@ def admin_enable_key(
     x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
 ):
     _check_admin(x_warmap_key)
-    rec = KEYSTORE.set_enabled(name, True)
-    if not rec:
-        raise HTTPException(404, 'No such key.')
-    return {'ok': True, 'name': rec.name, 'enabled': rec.enabled}
+    r = DBI.set_key_enabled(name, True)
+    if not r: raise HTTPException(404, 'No such key.')
+    return {'ok': True, 'name': r['name'], 'enabled': bool(r['enabled'])}
 
 
 @app.delete('/admin/keys/{name}')
@@ -517,7 +588,7 @@ def admin_delete_key(
     x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
 ):
     _check_admin(x_warmap_key)
-    if not KEYSTORE.remove(name):
+    if not DBI.remove_key(name):
         raise HTTPException(404, 'No such key.')
     return {'ok': True, 'removed': name}
 
@@ -557,7 +628,8 @@ def admin_quarantine_uploader(
         dst = QUARANTINE_DIR / p.name
         shutil.move(str(p), str(dst))
         moved.append(p.name)
-    KEYSTORE.set_enabled(safe_name, False)
+        DBI.remove_session(p.name)
+    DBI.set_key_enabled(safe_name, False)
     return {'ok': True, 'uploader': safe_name, 'quarantined': moved, 'count': len(moved)}
 
 
