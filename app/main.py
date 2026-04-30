@@ -1259,3 +1259,76 @@ def admin_remove_ignore(
     except Exception:
         pass
     return {'ok': True, 'removed': pattern}
+
+
+# ---------------------------------------------------------------------------
+# Actor labels (rename / reclassify per-actor).
+#
+# Lets an admin click an actor in the viewer and apply a custom label
+# ("Whispers Dungeon Entrance") and / or kind override ("dungeon_entrance"
+# even though it auto-classified as plain "portal").  Keyed by the same
+# composite (zone, skin, rx, ry, floor) the merger uses, so the viewer
+# does an O(1) lookup per actor on render and substitutes the user's
+# label / kind.
+# ---------------------------------------------------------------------------
+
+class ActorLabelRequest(BaseModel):
+    zone:          str
+    skin:          str
+    rx:            int
+    ry:            int
+    floor:         int = 1
+    label:         Optional[str] = None
+    kind_override: Optional[str] = None
+    note:          str = ''
+
+
+@app.get('/labels')
+@_LIMITER.limit('120/minute')
+def get_labels(request: Request,
+               x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    """Public-to-authenticated-callers list of actor labels.  Viewer
+    fetches this on signin + after every admin save and applies
+    overrides during render."""
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    return {'labels': DBI.list_actor_labels()}
+
+
+@app.post('/admin/labels')
+def admin_set_label(
+    body: ActorLabelRequest,
+    x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
+):
+    """Insert-or-update a label.  Setting both label and kind_override
+    to empty deletes the row (treat as 'clear this actor's overrides')."""
+    rec = _check_admin(x_warmap_key)
+    if not body.zone or not body.skin:
+        raise HTTPException(400, 'zone and skin required')
+    if (body.label or '').strip() == '' and (body.kind_override or '').strip() == '':
+        DBI.remove_actor_label(zone=body.zone, skin=body.skin,
+                               rx=body.rx, ry=body.ry, floor=body.floor)
+        return {'ok': True, 'cleared': True}
+    DBI.upsert_actor_label(
+        zone=body.zone, skin=body.skin, rx=body.rx, ry=body.ry, floor=body.floor,
+        label=body.label, kind_override=body.kind_override,
+        note=body.note, set_by=rec.name,
+    )
+    return {'ok': True, 'cleared': False}
+
+
+@app.delete('/admin/labels')
+def admin_remove_label(
+    zone:  str,
+    skin:  str,
+    rx:    int,
+    ry:    int,
+    floor: int = 1,
+    x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
+):
+    """Explicit label removal.  Same effect as POSTing with empty
+    label + kind_override but keeps the verb honest."""
+    _check_admin(x_warmap_key)
+    removed = DBI.remove_actor_label(zone=zone, skin=skin, rx=rx, ry=ry, floor=floor)
+    if not removed:
+        raise HTTPException(404, 'label not found')
+    return {'ok': True}

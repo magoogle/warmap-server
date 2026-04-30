@@ -115,6 +115,11 @@ const S = {
             return new Set(JSON.parse(raw));
         } catch (e) { return new Set(); }
     })(),
+    // Map of (zone|skin|rx|ry|floor) -> { label, kind_override, note }.
+    // Populated from GET /labels on signin + after every admin save.
+    // Render loop applies overrides per actor; actor info panel shows
+    // editable inputs to admins.
+    actorLabels: {},
     // Orientation: world-axis -> canvas-axis transform.  D4's coord system
     // doesn't map cleanly to "north up", so we let the user dial it in.
     // rot:   90deg increments clockwise (0|1|2|3)
@@ -321,7 +326,17 @@ const KIND_OVERRIDES = {
     well:'Well', interactable:'Other Interactable',
 };
 
+// Get the effective kind for an actor, honoring server-side label overrides.
+function effectiveActorKind(a) {
+    const lbl = lookupActorLabel(a);
+    return (lbl && lbl.kind_override) || a.kind;
+}
+
 function actorDisplayName(a) {
+    // Custom label set by an admin in the actor info panel.  Takes
+    // precedence over every auto-derived name below.
+    const lbl = lookupActorLabel(a);
+    if (lbl && lbl.label) return lbl.label;
     if (KIND_OVERRIDES[a.kind]) return KIND_OVERRIDES[a.kind];
     const skin = a.skin || '';
     if (skin.includes('Helltide_RewardChest_Random')) return 'Helltide Chest';
@@ -409,6 +424,35 @@ function persistShowOverrides() {
         localStorage.setItem('warmap_show_overrides',
             JSON.stringify([...S.viewerShowOverrides]));
     } catch (e) {}
+}
+
+// ---- Actor label overrides -----------------------------------------------
+// Lookup key matches the server's actor_labels primary key.  Note: rx/ry
+// in the merger come from rounded x/y, so we round here too -- the
+// viewer's actor list has the float positions.
+function actorLabelKey(zone, skin, x, y, floor) {
+    const rx = Math.round(x || 0);
+    const ry = Math.round(y || 0);
+    return `${zone || ''}|${skin || ''}|${rx}|${ry}|${floor || 1}`;
+}
+
+function lookupActorLabel(a) {
+    if (!S.actorLabels || !a) return null;
+    return S.actorLabels[actorLabelKey(S.currentKey, a.skin, a.x, a.y, a.floor)] || null;
+}
+
+async function refreshActorLabels() {
+    try {
+        const r = await getJSON('/labels');
+        const map = {};
+        for (const l of (r && r.labels) || []) {
+            const key = `${l.zone}|${l.skin}|${l.rx}|${l.ry}|${l.floor}`;
+            map[key] = l;
+        }
+        S.actorLabels = map;
+    } catch (e) {
+        // Non-fatal -- render still works without labels.
+    }
 }
 
 // ---- Sign-in overlay -----------------------------------------------------
@@ -801,7 +845,7 @@ function applyZoneData(d, resetView) {
 }
 
 function rebuildCellSet() {
-    if (!S.currentData) { S.cellSet = null; return; }
+    if (!S.currentData) { S.cellSet = null; S.wallDist = null; return; }
     const cells = S.currentData.grid?.floors?.[S.currentFloor] || [];
     const set = new Set();
     for (const c of cells) {
@@ -809,6 +853,10 @@ function rebuildCellSet() {
     }
     S.cellSet = set;
     S.cellRes = S.currentData.grid?.resolution || 0.5;
+    // Build the wall-distance map immediately so the next path simulation
+    // doesn't pay the BFS cost.  Cheap (linear in #walkable cells), and
+    // a zone load is rare relative to path picks.
+    S.wallDist = computeWallDistance(set);
 }
 
 function renderMeta() {
@@ -943,7 +991,8 @@ function render() {
         // Layer gate: skip the actor if its category is hidden.  Unknown
         // kinds fall into 'other' so they can be hidden via that toggle
         // without needing to land in KIND_CATEGORY explicitly.
-        const cat = KIND_CATEGORY[a.kind] || 'other';
+        const effKind = effectiveActorKind(a);
+        const cat = KIND_CATEGORY[effKind] || 'other';
         if (layers['actors_' + cat] === false) continue;
         // Server-ignore-list filter: hide actors whose skin matches any
         // dynamic-ignore pattern unless the user has clicked 'show in
@@ -953,7 +1002,7 @@ function render() {
         if (isHiddenSkin(a.skin)) continue;
         const t = applyOrient(a.x / cellRes, a.y / cellRes, rawBbox);
         const x = offX + t.x*scale, y = (h - offY) - t.y*scale;
-        const style = ACTOR_STYLE[a.kind] || { c:'#999', sym:'?' };
+        const style = ACTOR_STYLE[effKind] || { c:'#999', sym:'?' };
         const isSel = (a === S.selectedActor), isHov = (a === S.hoveredActor);
         if (isSel || isHov) {
             ctx.beginPath(); ctx.arc(x, y, isSel ? 13 : 10, 0, 2*Math.PI);
@@ -1252,12 +1301,43 @@ function renderActorPanel() {
     if (a.is_boss)  row('flag', 'BOSS');
     if (a.is_elite) row('flag', 'ELITE');
 
-    // Admin-only "Ignore this skin" action.  Adds the actor's skin to
-    // the server's dynamic ignore list (POST /admin/ignore); on success
-    // the merger drops matching actors from existing aggregates on the
-    // next cycle, AND the uploader syncs the updated list to the
-    // recorder's core/ignore_dynamic.lua so future recorder sessions
-    // also stop emitting them.
+    // Admin-only label + kind override editor.  Renames just THIS actor
+    // (keyed by zone+skin+rounded_pos+floor) without affecting other
+    // actors of the same skin.  Useful for naming dungeon-portal
+    // entrances by their destination dungeon, calling out a specific
+    // chest, etc.
+    if (S.tier === 'admin' && S.currentKey && a.skin) {
+        const existing = lookupActorLabel(a) || {};
+        const allKinds = Object.keys(ACTOR_STYLE).sort();
+        const kindOptions = ['<option value="">(use auto-detected: ' + esc(a.kind || '?') + ')</option>']
+            .concat(allKinds.map(k => `<option value="${esc(k)}"${k === existing.kind_override ? ' selected' : ''}>${esc(ACTOR_STYLE[k].label || k)} — <code>${esc(k)}</code></option>`))
+            .join('');
+        rows.push(
+            `<div class="actor-edit">
+                <div class="actor-edit-row">
+                    <label>Rename
+                        <input type="text" class="actor-edit-label"
+                               placeholder="${esc(actorDisplayName(a))}"
+                               value="${esc(existing.label || '')}" maxlength="80">
+                    </label>
+                </div>
+                <div class="actor-edit-row">
+                    <label>Reclassify
+                        <select class="actor-edit-kind">${kindOptions}</select>
+                    </label>
+                </div>
+                <div class="actor-actions">
+                    <button class="actor-save-btn">Save label</button>
+                    ${(existing.label || existing.kind_override)
+                        ? '<button class="actor-clear-btn ghost">Clear</button>' : ''}
+                    <span class="actor-edit-status muted"></span>
+                </div>
+            </div>`);
+    }
+
+    // Admin-only "Ignore this skin" action (separate from the label
+    // editor above).  Hides every actor with this skin via the global
+    // server ignore list -- different scope from per-actor labels.
     if (S.tier === 'admin' && a.skin) {
         rows.push(
             `<div class="actor-actions">
@@ -1270,7 +1350,57 @@ function renderActorPanel() {
     }
     D.actorBody.innerHTML = rows.join('');
 
-    // Wire the button (after innerHTML so the element exists).
+    // ---- Wire the label editor (admin only) ----
+    const saveBtn  = D.actorBody.querySelector('.actor-save-btn');
+    const clearBtn = D.actorBody.querySelector('.actor-clear-btn');
+    const labelInp = D.actorBody.querySelector('.actor-edit-label');
+    const kindSel  = D.actorBody.querySelector('.actor-edit-kind');
+    const editStat = D.actorBody.querySelector('.actor-edit-status');
+    async function saveLabel(label, kindOverride) {
+        if (editStat) editStat.textContent = 'saving...';
+        try {
+            const r = await adminFetch('/admin/labels', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    zone:  S.currentKey,
+                    skin:  a.skin,
+                    rx:    Math.round(a.x || 0),
+                    ry:    Math.round(a.y || 0),
+                    floor: a.floor || 1,
+                    label,
+                    kind_override: kindOverride,
+                }),
+            });
+            if (!r.ok) {
+                if (editStat) editStat.textContent = 'failed: HTTP ' + r.status;
+                return;
+            }
+            await refreshActorLabels();
+            renderActorPanel();   // re-render with the new state
+            render();
+        } catch (e) {
+            if (editStat) editStat.textContent = 'failed: ' + (e?.message || e);
+        }
+    }
+    if (saveBtn) {
+        saveBtn.addEventListener('click', () => {
+            saveLabel(labelInp ? labelInp.value : '', kindSel ? kindSel.value : '');
+        });
+    }
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => saveLabel('', ''));
+    }
+    if (labelInp) {
+        labelInp.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                saveLabel(labelInp.value, kindSel ? kindSel.value : '');
+            }
+        });
+    }
+
+    // ---- Wire the "Ignore this skin" button (separate scope) ----
     const btn = D.actorBody.querySelector('.ignore-skin-btn');
     const status = D.actorBody.querySelector('.ignore-skin-status');
     if (btn) {
@@ -1544,6 +1674,68 @@ function nearestWalkable(cx, cy) {
     return null;
 }
 
+// ---- Wall-distance transform (centerline routing) ----------------------
+// For each walkable cell, BFS-distance to the nearest non-walkable cell
+// (or boundary).  Used by aStar() to penalize cells near walls so paths
+// prefer the middle of corridors -- avoids the "hug the wall" look A*
+// gets when shortest distance is the only objective.
+//
+// Multi-source BFS seeded with every walkable cell that has at least
+// one non-walkable 4-neighbor (those have dist=1).  Linear in #walkable
+// cells, runs once per zone-load via rebuildCellSet().
+function computeWallDistance(cellSet) {
+    const dist = new Map();
+    const queue = [];
+    const ADJ = [[1,0],[-1,0],[0,1],[0,-1]];
+    // Seed: walkable cells touching a non-walkable get dist=1
+    for (const k of cellSet) {
+        const [cx, cy] = k.split(',').map(Number);
+        for (let i = 0; i < 4; i++) {
+            const nk = (cx + ADJ[i][0]) + ',' + (cy + ADJ[i][1]);
+            if (!cellSet.has(nk)) {
+                dist.set(k, 1);
+                queue.push([cx, cy, 1]);
+                break;
+            }
+        }
+    }
+    // BFS outward.  Use a head pointer instead of shift() so we stay
+    // O(N) rather than O(N^2).
+    let head = 0;
+    while (head < queue.length) {
+        const [cx, cy, d] = queue[head++];
+        const nextD = d + 1;
+        for (let i = 0; i < 4; i++) {
+            const nx = cx + ADJ[i][0];
+            const ny = cy + ADJ[i][1];
+            const nk = nx + ',' + ny;
+            if (!cellSet.has(nk)) continue;
+            if (dist.has(nk)) continue;
+            dist.set(nk, nextD);
+            queue.push([nx, ny, nextD]);
+        }
+    }
+    return dist;
+}
+
+// Centerline-routing tunables.  PENALTY_RADIUS sets how many cells away
+// from a wall stop incurring penalty (beyond this, full center-of-room
+// flat).  PENALTY_PER_STEP scales the gradient.
+//
+// At cellRes=0.5m, PENALTY_RADIUS=4 means cells within ~2m of a wall
+// get progressively penalized.  Penalty per step is 0.6, so the cell
+// directly against a wall (dist=1) costs +0.6*3=1.8 extra; +1.2 for
+// dist=2; +0.6 for dist=3; 0 for dist>=4.  These add to the base
+// movement cost (1.0 cardinal / 1.4142 diagonal).
+const PATH_PENALTY_RADIUS   = 4;
+const PATH_PENALTY_PER_STEP = 0.6;
+
+function edgePenalty(cx, cy) {
+    const d = (S.wallDist && S.wallDist.get(cx + ',' + cy)) || PATH_PENALTY_RADIUS;
+    if (d >= PATH_PENALTY_RADIUS) return 0;
+    return (PATH_PENALTY_RADIUS - d) * PATH_PENALTY_PER_STEP;
+}
+
 function aStar(start, goal) {
     if (!S.cellSet) return null;
     if (start.cx === goal.cx && start.cy === goal.cy) return [start];
@@ -1578,14 +1770,19 @@ function aStar(start, goal) {
         open.delete(bestKey);
         const gc = g.get(bestKey);
         for (const [dx, dy, cost] of NEIGHBORS) {
-            const nk = (cx+dx) + ',' + (cy+dy);
+            const nx = cx + dx, ny = cy + dy;
+            const nk = nx + ',' + ny;
             if (!S.cellSet.has(nk)) continue;
-            const tentative = gc + cost;
+            // Centerline: each step's true cost = base movement +
+            // proximity-to-wall penalty.  Heuristic h() stays
+            // unchanged (Manhattan-ish, admissible) so A* still
+            // terminates cleanly -- the penalty is non-negative
+            // and only inflates g, not h.
+            const tentative = gc + cost + edgePenalty(nx, ny);
             if (tentative < (g.get(nk) ?? Infinity)) {
                 came.set(nk, bestKey);
                 g.set(nk, tentative);
-                const node = { cx: cx+dx, cy: cy+dy };
-                open.set(nk, tentative + h(node, goal));
+                open.set(nk, tentative + h({cx: nx, cy: ny}, goal));
             }
         }
     }
@@ -1932,6 +2129,7 @@ document.getElementById('zone-download')?.addEventListener('click', async () => 
                 await refreshZoneList();
                 if (S.tier === 'admin') await refreshUploaders();
                 refreshServerIgnoreList();   // populate hidden-skins filter
+                refreshActorLabels();        // populate per-actor label overrides
             } catch (e) {
                 // 401 -> attemptSignin path already showed the overlay
                 // via refreshStatus's catch.  For any other error,

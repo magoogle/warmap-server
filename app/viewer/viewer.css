@@ -1012,8 +1012,66 @@ button {
 .tier-pill.tier-uploader { background: rgba(63,207,114,0.12);  color: var(--ok);     border-color: rgba(63,207,114,0.35); }
 .tier-pill.tier-reader   { background: rgba(92,199,255,0.12);  color: var(--info);   border-color: rgba(92,199,255,0.35); }
 
-/* Actor info panel: admin-only "Ignore this skin" action.  Sits at the
-   bottom of the panel below the field rows. */
+/* Actor info panel: admin-only label/kind editor + ignore action.
+   Sits at the bottom of the panel below the field rows. */
+.actor-edit {
+    margin-top: 0.7rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--border-subtle);
+}
+.actor-edit-row {
+    margin-bottom: 0.45rem;
+}
+.actor-edit-row label {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+    margin-bottom: 0.2rem;
+}
+.actor-edit-row input,
+.actor-edit-row select {
+    width: 100%;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    color: var(--text);
+    padding: 0.32rem 0.5rem;
+    font-family: inherit;
+    font-size: 0.82rem;
+    outline: none;
+    transition: border-color 0.12s, box-shadow 0.12s;
+}
+.actor-edit-row input:focus,
+.actor-edit-row select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.actor-save-btn {
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-edge);
+    color: var(--accent);
+    border-radius: var(--r-sm);
+    padding: 0.3rem 0.7rem;
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+.actor-save-btn:hover { background: var(--accent); color: #fff; }
+.actor-clear-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: var(--r-sm);
+    padding: 0.3rem 0.6rem;
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+.actor-clear-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.actor-edit-status { font-size: 0.72rem; }
+
 .actor-actions {
     margin-top: 0.7rem;
     padding-top: 0.6rem;
@@ -1021,6 +1079,7 @@ button {
     display: flex;
     align-items: center;
     gap: 0.6rem;
+    flex-wrap: wrap;
 }
 .ignore-skin-btn {
     background: var(--bg-elev-2);

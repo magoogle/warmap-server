@@ -115,6 +115,26 @@ CREATE TABLE IF NOT EXISTS ignore_patterns (
     added_by   TEXT,                -- key name of the admin who added it
     note       TEXT NOT NULL DEFAULT ''
 );
+
+-- User-applied labels for individual actors.  Lets the operator give
+-- specific actors a custom display name (e.g. label a dungeon portal
+-- with the dungeon name it leads to) and / or override the auto-derived
+-- kind classification.  Keyed identically to the actors table so the
+-- viewer can do an O(1) lookup per actor on render.
+CREATE TABLE IF NOT EXISTS actor_labels (
+    zone        TEXT NOT NULL,
+    skin        TEXT NOT NULL,
+    rx          INTEGER NOT NULL,
+    ry          INTEGER NOT NULL,
+    floor       INTEGER NOT NULL,
+    label       TEXT,                  -- nullable; null = no rename
+    kind_override TEXT,                -- nullable; null = use auto kind
+    note        TEXT NOT NULL DEFAULT '',
+    set_at      REAL NOT NULL,
+    set_by      TEXT,                  -- name of the admin who saved it
+    PRIMARY KEY (zone, skin, rx, ry, floor)
+);
+CREATE INDEX IF NOT EXISTS actor_labels_zone ON actor_labels(zone);
 """
 
 
@@ -372,4 +392,53 @@ class DB:
     def remove_ignore_pattern(self, pattern: str) -> bool:
         with self.write() as c:
             c.execute('DELETE FROM ignore_patterns WHERE pattern = ?', (pattern,))
+            return c.rowcount > 0
+
+    # -------- actor labels (rename / reclassify per-actor) --------
+    # Keyed by (zone, skin, rx, ry, floor) -- the same composite key the
+    # actors table uses, so a viewer-side lookup map can join them
+    # cheaply when rendering.
+
+    def list_actor_labels(self) -> list[dict]:
+        """All labels.  Cheap (typically <100 rows even with heavy use)."""
+        rows = self.query(
+            'SELECT zone, skin, rx, ry, floor, label, kind_override, note, '
+            'set_at, set_by FROM actor_labels ORDER BY set_at DESC')
+        return [dict(r) for r in rows]
+
+    def upsert_actor_label(self, *, zone: str, skin: str, rx: int, ry: int,
+                           floor: int, label: Optional[str] = None,
+                           kind_override: Optional[str] = None,
+                           note: str = '', set_by: str = '') -> bool:
+        """Insert-or-update a label.  Setting both label and kind_override
+        to None / '' will remove the row entirely (no-op label).  Returns
+        True if a row exists after the call (was set / updated), False if
+        the row was deleted."""
+        label_clean = (label or '').strip() or None
+        kind_clean  = (kind_override or '').strip() or None
+        if label_clean is None and kind_clean is None:
+            self.remove_actor_label(zone=zone, skin=skin, rx=rx, ry=ry, floor=floor)
+            return False
+        with self.write() as c:
+            c.execute("""
+                INSERT INTO actor_labels(zone, skin, rx, ry, floor,
+                                         label, kind_override, note, set_at, set_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(zone, skin, rx, ry, floor) DO UPDATE SET
+                    label = excluded.label,
+                    kind_override = excluded.kind_override,
+                    note = excluded.note,
+                    set_at = excluded.set_at,
+                    set_by = excluded.set_by
+            """, (zone, skin, rx, ry, floor, label_clean, kind_clean,
+                  note or '', time.time(), set_by))
+        return True
+
+    def remove_actor_label(self, *, zone: str, skin: str, rx: int, ry: int,
+                           floor: int) -> bool:
+        with self.write() as c:
+            c.execute(
+                'DELETE FROM actor_labels WHERE '
+                'zone = ? AND skin = ? AND rx = ? AND ry = ? AND floor = ?',
+                (zone, skin, rx, ry, floor))
             return c.rowcount > 0
