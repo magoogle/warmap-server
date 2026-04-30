@@ -471,6 +471,25 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     with tmp.open('w', encoding='utf-8') as f:
         json.dump(payload, f, indent=None, separators=(',', ':'))
     os.replace(tmp, out_path)
+
+    # Also write a pre-compressed companion so /zones/{key} can serve the
+    # gzipped bytes directly (Content-Encoding: gzip) without paying the
+    # gzip CPU cost on every request.  With multiple uploaders pulling the
+    # zone catalog in parallel, runtime gzip via GZipMiddleware was pegging
+    # the server's CPU.  Pre-compression turns each /zones/{key} response
+    # into a static-file read + sendfile -- effectively free.
+    import gzip
+    gz_path = out_dir / f'{_safe_filename(agg.key)}.json.gz'
+    gz_tmp  = gz_path.with_suffix('.gz.tmp')
+    with gz_tmp.open('wb') as f:
+        # mtime=0 makes the .gz reproducible (same bytes for same JSON);
+        # avoids spurious If-Modified-Since misses when the JSON content
+        # didn't actually change.  compresslevel=6 is the gzip default
+        # (good size/speed balance).
+        with gzip.GzipFile(fileobj=f, mode='wb', mtime=0, compresslevel=6) as gz:
+            with out_path.open('rb') as src:
+                gz.write(src.read())
+    os.replace(gz_tmp, gz_path)
     return out_path
 
 
