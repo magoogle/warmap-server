@@ -983,3 +983,31 @@ button {
 
 /* Smooth tab-pane swaps */
 .tab-pane:not([hidden]) { animation: fadeIn 0.15s ease-out; }
+
+/* ---------------------------------------------------------------------
+   Admin: tier dropdown in mint form + tier pills in the keys table.
+--------------------------------------------------------------------- */
+#mint-tier {
+    background: var(--bg-deep);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: 0.3rem 0.4rem;
+    font-size: 0.82rem;
+    cursor: pointer;
+}
+#mint-tier:focus { outline: none; border-color: var(--accent); }
+
+.tier-pill {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border: 1px solid transparent;
+}
+.tier-pill.tier-admin    { background: rgba(255,91,108,0.12);  color: var(--bad);    border-color: rgba(255,91,108,0.35); }
+.tier-pill.tier-uploader { background: rgba(63,207,114,0.12);  color: var(--ok);     border-color: rgba(63,207,114,0.35); }
+.tier-pill.tier-reader   { background: rgba(92,199,255,0.12);  color: var(--info);   border-color: rgba(92,199,255,0.35); }

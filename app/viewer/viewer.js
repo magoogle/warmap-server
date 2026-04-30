@@ -51,6 +51,7 @@ const D = {
     adminKeyInput:document.getElementById('admin-key-input'),
     adminKeySave: document.getElementById('admin-key-save'),
     mintName:     document.getElementById('mint-name'),
+    mintTier:     document.getElementById('mint-tier'),
     mintNote:     document.getElementById('mint-note'),
     mintGo:       document.getElementById('mint-go'),
     mintResult:   document.getElementById('mint-result'),
@@ -1425,24 +1426,26 @@ async function loadKeyTable() {
         const rows = (d.keys || []).map(k => {
             const lastSeen = k.last_used ? prettyAgo(k.last_used) : 'never';
             const cls = k.enabled ? '' : 'disabled';
+            const tier = k.tier || 'uploader';
             return `<tr class="${cls}">
                 <td>${esc(k.name)}${k.note ? ` <span class="muted">(${esc(k.note)})</span>` : ''}</td>
+                <td><span class="tier-pill tier-${esc(tier)}">${esc(tier)}</span></td>
                 <td>${k.uploads}</td>
                 <td>${esc(lastSeen)}</td>
                 <td>${k.enabled ? 'enabled' : '<span style="color:#cf3434">disabled</span>'}</td>
                 <td>
                     <button data-act="${k.enabled?'disable':'enable'}" data-name="${esc(k.name)}">${k.enabled?'disable':'enable'}</button>
                     <button data-act="delete" data-name="${esc(k.name)}">delete</button>
-                    <button data-act="quarantine" data-name="${esc(k.name)}">quarantine</button>
+                    ${tier === 'uploader' ? `<button data-act="quarantine" data-name="${esc(k.name)}">quarantine</button>` : ''}
                 </td>
             </tr>`;
         }).join('');
-        D.keyTableBody.innerHTML = rows || '<tr><td colspan="5" class="muted">No keys yet. Mint one above.</td></tr>';
+        D.keyTableBody.innerHTML = rows || '<tr><td colspan="6" class="muted">No keys yet. Mint one above.</td></tr>';
         D.keyTableBody.querySelectorAll('button').forEach(b => {
             b.addEventListener('click', () => keyAction(b.dataset.act, b.dataset.name));
         });
     } catch (e) {
-        D.keyTableBody.innerHTML = `<tr><td colspan="5">Error: ${esc(e.message)}</td></tr>`;
+        D.keyTableBody.innerHTML = `<tr><td colspan="6">Error: ${esc(e.message)}</td></tr>`;
     }
 }
 
@@ -1571,23 +1574,30 @@ function prettyBytes(n) {
 
 D.mintGo.addEventListener('click', async () => {
     const name = D.mintName.value.trim();
+    const tier = (D.mintTier?.value || 'uploader').trim();
     const note = D.mintNote.value.trim();
     if (!name) { D.mintResult.textContent = 'name required'; return; }
     const r = await adminFetch('/admin/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, note }),
+        body: JSON.stringify({ name, tier, note }),
     });
     if (!r.ok) { D.mintResult.textContent = `error ${r.status}`; return; }
     const k = await r.json();
+    // Different "what to send" copy depending on tier -- uploaders run
+    // install.bat, readers paste the key into the viewer's sign-in card.
+    const handoff = (k.tier === 'reader')
+        ? `Send this to ${esc(k.name)}. They paste it into the viewer's "Enter API Key" prompt.`
+        : `Send this to ${esc(k.name)}. They paste it during install.bat (or use update-warmap-server.bat).`;
     D.mintResult.innerHTML =
-        `<div><b>${esc(k.name)}</b>'s key:</div>` +
+        `<div><b>${esc(k.name)}</b>'s key <span class="muted">(${esc(k.tier || 'uploader')})</span>:</div>` +
         `<div>${esc(k.key)} <button class="copy-btn" id="mint-copy">copy</button></div>` +
-        `<div class="muted" style="margin-top:0.4rem">Send this string to ${esc(k.name)}. They paste it in install.bat.</div>`;
+        `<div class="muted" style="margin-top:0.4rem">${handoff}</div>`;
     document.getElementById('mint-copy').addEventListener('click', () => {
         navigator.clipboard.writeText(k.key);
     });
     D.mintName.value = ''; D.mintNote.value = '';
+    if (D.mintTier) D.mintTier.value = 'uploader';     // reset to default
     await loadKeyTable();
 });
 

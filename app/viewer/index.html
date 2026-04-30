@@ -163,19 +163,23 @@
                 </div>
                 <div id="admin-panel" hidden>
                     <section class="admin-section">
-                        <h3>Mint a new uploader key</h3>
+                        <h3>Mint a new key</h3>
                         <div class="mint-row">
-                            <input type="text" id="mint-name" placeholder="friend's name (e.g. davids)" />
+                            <input type="text" id="mint-name" placeholder="friend's name (e.g. alice)" />
+                            <select id="mint-tier" title="Tier: uploader can record AND read; reader can only read/download zones">
+                                <option value="uploader">Uploader (can record + read)</option>
+                                <option value="reader">Reader (read-only / download)</option>
+                            </select>
                             <input type="text" id="mint-note" placeholder="note (optional)" />
                             <button id="mint-go">Mint</button>
                         </div>
                         <div id="mint-result" class="mint-result"></div>
                     </section>
                     <section class="admin-section">
-                        <h3>Existing uploader keys</h3>
+                        <h3>Existing keys</h3>
                         <table class="key-table">
                             <thead>
-                                <tr><th>Name</th><th>Uploads</th><th>Last seen</th><th>State</th><th></th></tr>
+                                <tr><th>Name</th><th>Tier</th><th>Uploads</th><th>Last seen</th><th>State</th><th></th></tr>
                             </thead>
                             <tbody id="key-table-body"></tbody>
                         </table>
