@@ -53,6 +53,10 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+
 from app.keys import KeyStore   # legacy fallback for migration only
 from app.db   import DB
 
@@ -189,8 +193,35 @@ def _import_merger():
     return merge
 
 
+# ----- Rate limiter --------------------------------------------------------
+# Per-IP rate limiting via slowapi.  In-memory backend (per uvicorn worker),
+# which means with 4 workers an attacker hitting at exactly the limit can
+# distribute across workers and effectively get 4x through.  Acceptable
+# for our threat model -- limits exist to deter casual scrapers and runaway
+# friend scripts, not to mitigate DDoS.  The master ADMIN_KEY is exempt
+# (so the operator can hammer their own server without 429s during admin
+# work) via the _is_admin_request helper below.
+#
+# Limits chosen for typical use:
+#   /upload                    60/min   (multipart, server cost)
+#   /zones, /zones/{key}, etc  120/min  (~2/s sustained, plenty for friend syncs)
+#   /admin/*                    30/min   (rare ops, tight ceiling)
+def _is_admin_request(request: Request) -> bool:
+    """Bypass rate limits when the master ADMIN_KEY is presented."""
+    return ADMIN_KEY and request.headers.get('x-warmap-key') == ADMIN_KEY
+
+
+_LIMITER = Limiter(
+    key_func=get_remote_address,
+    default_limits=[],                  # apply per-route via decorators
+    storage_uri='memory://',
+)
+
+
 # ----- App ----------------------------------------------------------------
-app = FastAPI(title='WarMap Upload Server', version='0.1')
+app = FastAPI(title='WarMap Upload Server', version='0.2')
+app.state.limiter = _LIMITER
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # (Was: GZipMiddleware compressing every response.  Replaced with
 # pre-compressed companion files for /zones/{key} -- the merger writes
@@ -264,24 +295,35 @@ class _AuthRec:
         self.name, self.tier, self.key = name, tier, key
 
 
-def _check_auth(provided: Optional[str]) -> _AuthRec:
+_TIERS_ALL          = frozenset({'admin', 'uploader', 'reader'})
+_TIERS_UPLOAD       = frozenset({'admin', 'uploader'})  # readers can't upload
+_TIERS_READ         = _TIERS_ALL                         # any valid key reads
+
+
+def _check_auth(provided: Optional[str],
+                allowed_tiers: frozenset = _TIERS_ALL) -> _AuthRec:
     """Validate against the DB.  Master admin key (env) is recognized
-    directly.  Otherwise look up in the keys table."""
+    directly.  Otherwise look up in the keys table.  When `allowed_tiers`
+    is restricted, also gate by tier -- e.g. /upload passes
+    _TIERS_UPLOAD so reader-tier keys get a 403 instead of polluting
+    the dump dir."""
     if not ADMIN_KEY:
         raise HTTPException(503, 'Server is not configured (no admin key set).')
     if provided == ADMIN_KEY:
-        return _AuthRec(name='admin', tier='admin', key=provided)
-    row = DBI.find_key_by_secret((provided or '').strip()) if provided else None
-    if not row or not row['enabled']:
-        raise HTTPException(401, 'Bad or missing X-WarMap-Key header.')
-    return _AuthRec(name=row['name'], tier=row['tier'], key=row['key'])
+        rec = _AuthRec(name='admin', tier='admin', key=provided)
+    else:
+        row = DBI.find_key_by_secret((provided or '').strip()) if provided else None
+        if not row or not row['enabled']:
+            raise HTTPException(401, 'Bad or missing X-WarMap-Key header.')
+        rec = _AuthRec(name=row['name'], tier=row['tier'], key=row['key'])
+    if rec.tier not in allowed_tiers:
+        raise HTTPException(403,
+            f"Tier '{rec.tier}' not permitted; need one of {sorted(allowed_tiers)}.")
+    return rec
 
 
 def _check_admin(provided: Optional[str]) -> _AuthRec:
-    rec = _check_auth(provided)
-    if rec.tier != 'admin':
-        raise HTTPException(403, 'Admin tier required.')
-    return rec
+    return _check_auth(provided, allowed_tiers=frozenset({'admin'}))
 
 
 def _safe_filename(name: str) -> str:
@@ -521,8 +563,28 @@ def status():
     }
 
 
+# ---------------------------------------------------------------------------
+# Read endpoints -- all gated behind a valid X-WarMap-Key (any tier:
+# admin/uploader/reader) and rate-limited per IP.  /health is the only
+# unauthenticated endpoint, so monitoring / load-balancer probes still work.
+#
+# Why gate reads:  the merged map data is shared with friends via reader-
+# tier keys.  Public reads would let anyone scrape the full catalog without
+# any way to revoke access if a key holder misbehaves.  Each call also
+# bumps the key's last_used + uploads counter so the operator can see who
+# is actively pulling.
+#
+# Master ADMIN_KEY is rate-limit-exempt (see _is_admin_request) so the
+# operator's own admin tooling never trips its own limits.
+# ---------------------------------------------------------------------------
+
 @app.get('/saturated.json')
-def get_saturated():
+@_LIMITER.limit('120/minute', exempt_when=_is_admin_request)
+def get_saturated(request: Request,
+                  x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    if not _is_admin_request(request):
+        # _LIMITER.limit decorator above already checked the IP rate; auth-check now.
+        _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     p = SIDECAR / 'saturated.json'
     if not p.exists():
         return JSONResponse({'updated_at': 0, 'zones': [], 'pit_worlds': []})
@@ -530,7 +592,11 @@ def get_saturated():
 
 
 @app.get('/coverage')
-def get_coverage():
+@_LIMITER.limit('120/minute', exempt_when=_is_admin_request)
+def get_coverage(request: Request,
+                 x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    if not _is_admin_request(request):
+        _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     p = DATA_DIR / 'coverage.json'
     if not p.exists():
         raise HTTPException(404, 'No merge has run yet.')
@@ -538,7 +604,11 @@ def get_coverage():
 
 
 @app.get('/actor-index')
-def get_actor_index():
+@_LIMITER.limit('120/minute', exempt_when=_is_admin_request)
+def get_actor_index(request: Request,
+                    x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    if not _is_admin_request(request):
+        _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     p = DATA_DIR / '_actor_index.json'
     if not p.exists():
         raise HTTPException(404, 'No merge has run yet.')
@@ -546,7 +616,11 @@ def get_actor_index():
 
 
 @app.get('/zones/{key}')
-def get_zone(key: str, request: Request):
+@_LIMITER.limit('120/minute', exempt_when=_is_admin_request)
+def get_zone(key: str, request: Request,
+             x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    if not _is_admin_request(request):
+        _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     safe = _safe_filename(key + '.json')
     if not safe:
         raise HTTPException(400, 'Bad zone key.')
@@ -582,7 +656,11 @@ def get_zone(key: str, request: Request):
 
 
 @app.get('/zones')
-def list_zones():
+@_LIMITER.limit('120/minute', exempt_when=_is_admin_request)
+def list_zones(request: Request,
+               x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    if not _is_admin_request(request):
+        _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     zones = sorted(DATA_DIR.glob('*.json'))
     return {'zones': [z.stem for z in zones if not z.name.startswith('_')]}
 
@@ -634,7 +712,9 @@ def list_uploaders():
 
 
 @app.post('/upload')
+@_LIMITER.limit('60/minute', exempt_when=_is_admin_request)
 async def upload(
+    request: Request,
     files: list[UploadFile] = File(...),
     # client_id form field is now ignored (it was always spoofable). The
     # canonical uploader name comes from the authenticated key.  We accept
@@ -642,7 +722,9 @@ async def upload(
     client_id: str = Form(default=''),
     x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
 ):
-    rec = _check_auth(x_warmap_key)
+    # Reader-tier keys are explicitly NOT allowed to upload -- they're for
+    # downloading only.  Admin + uploader pass.
+    rec = _check_auth(x_warmap_key, allowed_tiers=_TIERS_UPLOAD)
     canonical = ''.join(c for c in rec.name if c.isalnum() or c in '_-')[:32] or 'anon'
     accepted, rejected = [], []
     for f in files:
@@ -695,6 +777,12 @@ def merge_now(x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap
 class MintRequest(BaseModel):
     name: str
     note: str = ''
+    # Tier defaults to 'uploader' for backward compat with the existing
+    # admin tooling that mints contributor keys.  Pass 'reader' to mint
+    # a download-only key for a friend (cannot upload, can pull all read
+    # endpoints).  'admin' is rejected -- the master admin key is the
+    # only admin-tier credential, set via WARMAP_API_KEY env.
+    tier: str = 'uploader'
 
 
 @app.get('/admin/keys')
@@ -721,7 +809,12 @@ def admin_mint_key(
     name = (body.name or '').strip()
     if not name:
         raise HTTPException(400, 'name required')
-    # Idempotent on name: if a key already exists with this name, return it
+    tier = (body.tier or 'uploader').strip().lower()
+    if tier not in {'uploader', 'reader'}:
+        raise HTTPException(400, "tier must be 'uploader' or 'reader'")
+    # Idempotent on name: if a key already exists with this name, return it.
+    # Note: an existing key keeps its original tier -- to retier, delete and
+    # remint.  This avoids surprise privilege escalation if a name collides.
     existing = DBI.query_one('SELECT * FROM keys WHERE name = ?', (name,))
     if existing:
         return {
@@ -732,10 +825,10 @@ def admin_mint_key(
     import secrets
     new_key = secrets.token_hex(32)
     DBI.upsert_key(
-        name=name, key=new_key, tier='uploader',
+        name=name, key=new_key, tier=tier,
         created_at=time.time(), note=body.note,
     )
-    return {'name': name, 'key': new_key, 'tier': 'uploader',
+    return {'name': name, 'key': new_key, 'tier': tier,
             'created_at': time.time(), 'note': body.note}
 
 

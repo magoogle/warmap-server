@@ -1,3 +1,7 @@
 fastapi>=0.110,<1
 uvicorn[standard]>=0.27,<1
 python-multipart>=0.0.7
+# Per-IP rate limiting on read + upload endpoints.  In-memory backend is
+# per-worker, which is fine for our threat model (deters scrapers, not
+# DDoS).  See _LIMITER setup in app/main.py.
+slowapi>=0.1.9,<1
