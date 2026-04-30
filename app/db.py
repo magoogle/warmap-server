@@ -103,6 +103,18 @@ CREATE TABLE IF NOT EXISTS uploads (
 );
 CREATE INDEX IF NOT EXISTS uploads_client ON uploads(client_id);
 CREATE INDEX IF NOT EXISTS uploads_time   ON uploads(accepted_at);
+
+-- Dynamic skin-ignore list, additive on top of the hardcoded
+-- _SKIN_IGNORE_SUBSTR in merger/merge.py.  Admin can add patterns
+-- via the viewer (right-click "Ignore this skin" on an actor).
+-- The merger reads this table on every cycle so additions take
+-- effect on the next merge run -- no server restart needed.
+CREATE TABLE IF NOT EXISTS ignore_patterns (
+    pattern    TEXT PRIMARY KEY,    -- substring to match against skin
+    added_at   REAL NOT NULL,
+    added_by   TEXT,                -- key name of the admin who added it
+    note       TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -329,3 +341,35 @@ class DB:
                     r.get('first_seen_at'),
                     r.get('last_seen_at'),
                 ))
+
+
+    # -------- ignore-pattern table --------
+    # Dynamic additions to the hardcoded skin-ignore substring list in
+    # merger/merge.py.  Admin manages via the viewer; merger reads these
+    # patterns each cycle and combines with the static list.
+    def list_ignore_patterns(self) -> list[dict]:
+        rows = self.query(
+            'SELECT pattern, added_at, added_by, note '
+            'FROM ignore_patterns ORDER BY added_at DESC')
+        return [dict(r) for r in rows]
+
+    def list_ignore_pattern_strings(self) -> list[str]:
+        """Just the pattern strings, alphabetically.  Cheap to call --
+        merger hits this on every cycle."""
+        rows = self.query('SELECT pattern FROM ignore_patterns ORDER BY pattern')
+        return [r[0] for r in rows]
+
+    def add_ignore_pattern(self, pattern: str, added_by: str, note: str = '') -> bool:
+        """True if newly added; False if it already existed."""
+        with self.write() as c:
+            c.execute(
+                'INSERT OR IGNORE INTO ignore_patterns(pattern, added_at, added_by, note) '
+                'VALUES(?, ?, ?, ?)',
+                (pattern, time.time(), added_by, note),
+            )
+            return c.rowcount > 0
+
+    def remove_ignore_pattern(self, pattern: str) -> bool:
+        with self.write() as c:
+            c.execute('DELETE FROM ignore_patterns WHERE pattern = ?', (pattern,))
+            return c.rowcount > 0

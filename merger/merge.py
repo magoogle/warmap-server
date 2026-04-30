@@ -397,7 +397,31 @@ _SKIN_IGNORE_SUBSTR = (
 
 
 def _is_ignored_skin(skin: str) -> bool:
-    return any(s in skin for s in _SKIN_IGNORE_SUBSTR)
+    if any(s in skin for s in _SKIN_IGNORE_SUBSTR):
+        return True
+    # Dynamic patterns: admin-added at runtime via /admin/ignore.
+    # _DYNAMIC_IGNORE is refreshed by the caller (app/main.py's _run_merge)
+    # on every merge cycle so additions take effect within ~30s.
+    return any(s in skin for s in _DYNAMIC_IGNORE)
+
+
+# Mutable list -- callers (the FastAPI _run_merge) replace this with the
+# DB's current ignore_patterns on every merge cycle.  Empty by default
+# so a stand-alone merger run (no DB) just uses the static list.
+_DYNAMIC_IGNORE: tuple = ()
+
+
+def set_dynamic_ignore(patterns):
+    """Replace the dynamic ignore-pattern set.  Called by the FastAPI
+    server before kicking off a merge so the merger picks up admin-
+    added ignores.  Idempotent on identical input."""
+    global _DYNAMIC_IGNORE
+    new = tuple(p for p in (patterns or []) if p)
+    if new != _DYNAMIC_IGNORE:
+        _DYNAMIC_IGNORE = new
+        # Force the next merge to do a full rebuild so existing aggregates
+        # drop the newly-ignored skins.
+        reset_merge_state()
 
 
 def _vote_cell(cell_map: dict[CellKey, CellAgg], cx: int, cy: int, w: int) -> None:

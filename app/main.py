@@ -449,6 +449,14 @@ def _run_merge() -> dict:
             _last_merge['error'] = None
             try:
                 merge = _import_merger()
+                # Refresh the merger's dynamic ignore-list from the DB so
+                # admin-added patterns apply on this cycle.  Cheap (a
+                # single SELECT) and safely no-ops when the list hasn't
+                # changed.
+                try:
+                    merge.set_dynamic_ignore(DBI.list_ignore_pattern_strings())
+                except Exception:
+                    pass
                 state = merge.merge_all(DUMPS_DIR, only_complete=False)
                 # Selective emit: when the merger ran in incremental mode
                 # it tells us which zone keys were touched this cycle, so
@@ -714,6 +722,19 @@ def whoami(request: Request,
     """
     rec = _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     return {'name': rec.name, 'tier': rec.tier}
+
+
+@app.get('/ignore-list')
+@_LIMITER.limit('120/minute')
+def get_ignore_list(request: Request,
+                    x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    """Public-to-authenticated-callers list of dynamic ignore patterns
+    that the recorder + merger should use IN ADDITION to their hardcoded
+    static lists.  The uploader fetches this periodically and writes it
+    to the recorder's core/ignore_dynamic.lua so a freshly-loaded
+    recorder picks up admin-added ignores without a code change."""
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    return {'patterns': DBI.list_ignore_pattern_strings()}
 
 
 @app.get('/coverage')
@@ -1138,3 +1159,66 @@ def admin_list_quarantine(
                 'mtime': p.stat().st_mtime,
             })
     return {'items': items, 'count': len(items)}
+
+
+# ---------------------------------------------------------------------------
+# Dynamic ignore-list management (admin only).
+#
+# These patterns are additive on top of the hardcoded _SKIN_IGNORE_SUBSTR in
+# merger/merge.py.  When admin adds 'BurningAether' here, the merger drops
+# any actor whose skin contains that substring on the next merge cycle, and
+# the uploader pushes the same list to the recorder via core/ignore_dynamic.lua
+# so subsequent recorder sessions also stop emitting it.
+# ---------------------------------------------------------------------------
+
+class IgnoreAddRequest(BaseModel):
+    pattern: str
+    note:    str = ''
+
+
+@app.get('/admin/ignore')
+def admin_list_ignore(
+    x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
+):
+    _check_admin(x_warmap_key)
+    return {'patterns': DBI.list_ignore_patterns()}
+
+
+@app.post('/admin/ignore')
+def admin_add_ignore(
+    body: IgnoreAddRequest,
+    x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
+):
+    rec = _check_admin(x_warmap_key)
+    pattern = (body.pattern or '').strip()
+    if not pattern:
+        raise HTTPException(400, 'pattern required')
+    if len(pattern) > 200:
+        raise HTTPException(400, 'pattern too long (max 200)')
+    added = DBI.add_ignore_pattern(pattern, added_by=rec.name, note=body.note)
+    # Reset the merger's cached state so the next merge cycle re-applies
+    # the updated ignore list to existing dumps (otherwise an actor that
+    # already merged into a zone aggregate stays there until eviction).
+    try:
+        merge = _import_merger()
+        merge.reset_merge_state()
+    except Exception:
+        pass
+    return {'ok': True, 'added': added, 'pattern': pattern}
+
+
+@app.delete('/admin/ignore/{pattern}')
+def admin_remove_ignore(
+    pattern: str,
+    x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
+):
+    _check_admin(x_warmap_key)
+    removed = DBI.remove_ignore_pattern(pattern)
+    if not removed:
+        raise HTTPException(404, 'pattern not found')
+    try:
+        merge = _import_merger()
+        merge.reset_merge_state()
+    except Exception:
+        pass
+    return {'ok': True, 'removed': pattern}
