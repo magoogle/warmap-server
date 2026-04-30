@@ -36,26 +36,17 @@
         </div>
     </header>
 
-    <!-- Sign-in overlay: shown on boot when no admin key is in
-         localStorage, and again if a fetch returns 401.  Replaces the
-         old "stuck on connecting..." silent failure. -->
-    <div id="signin-overlay" hidden>
-        <div class="signin-card">
-            <h2>WarMap</h2>
-            <p class="signin-sub">Paste your API key to continue.<br/>Operator? Use the master admin key.</p>
-            <input type="password" id="signin-input" placeholder="64-character hex key" autocomplete="off" />
-            <div class="signin-error" id="signin-error"></div>
-            <button id="signin-btn" type="button">Sign in</button>
-            <div class="signin-hint">
-                Your key is saved to <code>localStorage</code> on this domain only.
-                It never leaves your browser except as the <code>X-WarMap-Key</code>
-                request header on calls to this server.
-            </div>
-        </div>
-    </div>
 
     <main>
         <aside id="sidebar">
+            <!-- API key paste field.  Saves to localStorage; required for
+                 every gated endpoint.  Tiny indicator dot turns green
+                 when the saved key validates against /status. -->
+            <div class="apikey-row" id="apikey-row">
+                <span class="apikey-dot" id="apikey-dot"></span>
+                <input type="password" id="apikey-input" placeholder="paste API key" autocomplete="off" />
+            </div>
+
             <div class="tabs">
                 <button class="tab active" data-tab="zones">Zones</button>
                 <button class="tab"        data-tab="layers">Layers</button>
