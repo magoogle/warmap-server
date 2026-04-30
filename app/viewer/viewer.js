@@ -86,7 +86,10 @@ const S = {
     // flipY: mirror cell Y axis
     orient: JSON.parse(localStorage.getItem('warmap_orient') || '{}') || {},
 };
-S.orient.rot   = S.orient.rot   ?? 0;
+// Defaults that match the D4 top-down view: 180deg rotation puts the
+// player's "south" downward on the canvas.  Users can re-tune via the
+// orient buttons; their choice persists in localStorage.
+S.orient.rot   = S.orient.rot   ?? 2;
 S.orient.flipX = S.orient.flipX ?? false;
 S.orient.flipY = S.orient.flipY ?? false;
 

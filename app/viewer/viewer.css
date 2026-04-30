@@ -8,6 +8,8 @@ body {
     height: 100vh;
     display: flex;
     flex-direction: column;
+    overflow: hidden;   /* keep the orient/legend bar on screen even when
+                           the canvas would otherwise push them below */
 }
 
 header {
