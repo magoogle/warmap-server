@@ -201,34 +201,21 @@ class CellAgg:
     def total(self) -> int:
         return self.walk + self.block
 
-    # Tunables for the transient-wall override.  Boss rooms in lairs
-    # (Boss_WT*_*) and Hordes wave-end gates have walls that exist ONLY
-    # while the boss is alive / wave is active.  Recordings made during
-    # those moments observe the cells as blocked; recordings made after
-    # the boss dies / wave ends observe them walkable.  Pure majority vote
-    # leaves them as black boxes if more recordings happened during the
-    # gated state than after.
+    # Walkable trumps blocked.  The recorder's grid_probe uses the host's
+    # is_point_walkeable() which is a deterministic snapshot of the game's
+    # walkable mesh -- if it returned True for a cell in any session, that
+    # cell IS walkable in the game.  Walls never observe as walkable.
+    # Boss-room doors and Hordes wave-gates DO observe walkable post-fight,
+    # so even one such observation should win against any number of
+    # observations made while the door was closed.
     #
-    # Override: if at least WALK_FLOOR observations saw the cell walkable
-    # AND the walkable fraction exceeds WALK_RATIO_FLOOR, declare walkable
-    # even when block-votes outnumber walk-votes.  Floor + ratio together
-    # prevent single-observation noise (clipping bugs) from flipping real
-    # walls.
-    WALK_FLOOR = 2
-    WALK_RATIO_FLOOR = 0.10
-
+    # The previous "majority vote" + "10% threshold + walk_count >= 2"
+    # logic was too conservative -- a boss-room door observed walkable in
+    # 1 session out of 6 stayed blocked because walk_count < 2.  With
+    # bias-toward-walkable, that case correctly becomes walkable.
     @property
     def is_walkable(self) -> bool:
-        if self.walk == 0:
-            return False
-        if self.walk >= self.block:
-            return True
-        # Block-majority -- check transient-wall override.
-        if (self.walk >= CellAgg.WALK_FLOOR
-            and self.total > 0
-            and self.walk / self.total >= CellAgg.WALK_RATIO_FLOOR):
-            return True
-        return False
+        return self.walk >= 1
 
     @property
     def confidence(self) -> float:
