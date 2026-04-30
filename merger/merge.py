@@ -325,6 +325,16 @@ def _merge_actor(actors: dict[ActorKey, ActorAgg], a: dict, session_id: str) -> 
     skin = a.get('skin')
     if not skin:
         return
+    # Drop actors whose position is meaningless for pathing (they spawn
+    # wherever a transient world event happened -- e.g. the pit-boss
+    # paragon-glyph upgrade gizmo spawns at the boss kill location, which
+    # is essentially random per-run).  Filter at merge time so re-merging
+    # also cleans them out of any existing dumps that pre-date the
+    # recorder-side filter in actor_capture.lua's SKIN_IGNORE_SUBSTR.
+    if 'Gizmo_Paragon_Glyph_Upgrade' in skin \
+       or 'EGD_MSWK_GlyphUpgrade' in skin \
+       or 'Pit_Glyph' in skin:
+        return
     rx = round(a.get('x', 0))
     ry = round(a.get('y', 0))
     floor = a.get('floor', 1)

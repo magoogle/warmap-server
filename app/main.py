@@ -37,8 +37,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -232,6 +232,52 @@ def _safe_filename(name: str) -> str:
     return safe if 8 <= len(safe) <= 200 else ''
 
 
+def _conditional_file_response(path: Path, request: Request, media_type: str):
+    """FileResponse with proper conditional-GET handling.
+
+    Starlette's FileResponse advertises Last-Modified + ETag but doesn't
+    actually compare them against If-Modified-Since / If-None-Match -- so
+    polling clients (StaticPather's fetcher, the viewer) re-download the
+    full body even when nothing has changed.  This helper does the
+    comparison and returns 304 with no body when the client already has
+    the current version.
+    """
+    import email.utils
+    import hashlib
+
+    st = path.stat()
+    # Cheap, stable ETag derived from (mtime, size).  Same file -> same etag.
+    etag = '"{}"'.format(
+        hashlib.md5(f'{st.st_mtime_ns}-{st.st_size}'.encode()).hexdigest())
+    last_modified = email.utils.formatdate(st.st_mtime, usegmt=True)
+
+    inm = request.headers.get('if-none-match')
+    ims = request.headers.get('if-modified-since')
+
+    not_modified = False
+    if inm and inm.strip() == etag:
+        not_modified = True
+    elif ims:
+        try:
+            ims_ts = email.utils.parsedate_to_datetime(ims).timestamp()
+            # Compare to second resolution -- HTTP-date is whole-second.
+            if int(ims_ts) >= int(st.st_mtime):
+                not_modified = True
+        except (TypeError, ValueError):
+            pass
+
+    if not_modified:
+        return Response(status_code=304, headers={
+            'ETag': etag,
+            'Last-Modified': last_modified,
+        })
+
+    return FileResponse(path, media_type=media_type, headers={
+        'ETag': etag,
+        'Last-Modified': last_modified,
+    })
+
+
 def _run_merge() -> dict:
     """Run the merger against DUMPS_DIR -> DATA_DIR.  Also refreshes the
     SQLite index (sessions table + actors table) from the same scan."""
@@ -392,14 +438,17 @@ def get_actor_index():
 
 
 @app.get('/zones/{key}')
-def get_zone(key: str):
+def get_zone(key: str, request: Request):
     safe = _safe_filename(key + '.json')
     if not safe:
         raise HTTPException(400, 'Bad zone key.')
     p = DATA_DIR / safe
     if not p.exists():
         raise HTTPException(404, f'No data for zone {key}.')
-    return FileResponse(p, media_type='application/json')
+    # Conditional GET so StaticPather's periodic refresh is cheap.
+    # Starlette's FileResponse advertises Last-Modified + ETag but doesn't
+    # do the comparison itself, so we handle it here.
+    return _conditional_file_response(p, request, media_type='application/json')
 
 
 @app.get('/zones')
@@ -640,6 +689,74 @@ def admin_quarantine_dump(
     dst = QUARANTINE_DIR / safe
     shutil.move(str(src), str(dst))
     return {'ok': True, 'moved_to': str(dst)}
+
+
+@app.post('/admin/zone_reset/{key}')
+def admin_zone_reset(
+    key: str,
+    x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
+):
+    """Quarantine every dump that contributed to a zone key, delete the
+    merged JSON, and trigger a re-merge.  Use when a recorder bug has
+    contaminated a zone -- e.g. the pre-fix undercity recordings that
+    flattened all floors onto floor=1.  After the fix lands, call this
+    so future uploads can rebuild the zone cleanly without the bad
+    data leaking back through re-merge.
+
+    A dump "belongs" to a zone when its header's `zone` field equals the
+    requested key (overworld/town/nmd/undercity/etc) OR its header's
+    `world` field equals the key (pit, where world is the per-template
+    key used by the merger).
+    """
+    _check_admin(x_warmap_key)
+    safe_key = _safe_filename(key + '.json')
+    if not safe_key:
+        raise HTTPException(400, 'Bad zone key.')
+
+    # 1. Walk dumps, identify ones that belong to this zone, quarantine them.
+    moved = []
+    scan_errors = 0
+    for p in DUMPS_DIR.glob('*.ndjson'):
+        try:
+            with open(p, encoding='utf-8') as f:
+                first_line = f.readline()
+            if not first_line:
+                continue
+            header = json.loads(first_line)
+            # Recorder writes the header as { type: 'header', zone: ..., world: ..., ... }
+            if header.get('type') != 'header':
+                continue
+            zone = header.get('zone')
+            world = header.get('world')
+            if zone == key or world == key:
+                dst = QUARANTINE_DIR / p.name
+                shutil.move(str(p), str(dst))
+                moved.append(p.name)
+                DBI.remove_session(p.name)
+        except (OSError, ValueError, json.JSONDecodeError):
+            scan_errors += 1
+
+    # 2. Drop the merged zone JSON.
+    zone_path = DATA_DIR / safe_key
+    json_existed = zone_path.exists()
+    if json_existed:
+        try:
+            zone_path.unlink()
+        except OSError:
+            pass
+
+    # 3. Trigger a fresh merge so any remaining dumps re-aggregate (and the
+    #    actor index regenerates without the dropped data).
+    threading.Thread(target=_run_merge, daemon=True).start()
+
+    return {
+        'ok': True,
+        'key': key,
+        'dumps_quarantined': moved,
+        'count': len(moved),
+        'merged_json_deleted': json_existed,
+        'scan_errors': scan_errors,
+    }
 
 
 @app.post('/admin/quarantine_uploader/{name}')

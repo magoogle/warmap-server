@@ -125,6 +125,28 @@
                             <tbody id="key-table-body"></tbody>
                         </table>
                     </section>
+                    <section class="admin-section">
+                        <h3>Zone cleanup</h3>
+                        <p class="muted">Reset a zone when a recorder bug contaminated its data
+                            (wrong floor counts, ghost cells, garbage at world origin, etc.).
+                            Quarantines every dump that contributed, deletes the merged JSON,
+                            and triggers a re-merge.  Fresh recordings rebuild it cleanly.</p>
+                        <div class="mint-row">
+                            <select id="reset-zone-select" class="reset-zone-select">
+                                <option value="">-- pick a zone --</option>
+                            </select>
+                            <button id="reset-zone-go">Reset zone</button>
+                        </div>
+                        <div id="reset-result" class="mint-result"></div>
+                    </section>
+                    <section class="admin-section">
+                        <h3>Quarantine <span id="quarantine-count" class="muted"></span></h3>
+                        <p class="muted">Dumps that have been moved out of the merge pipeline.
+                            Use the buttons in the table above (or "Reset zone") to add to this list.
+                            To restore a quarantined dump, move the file back into <code>dumps/</code>
+                            on the server and trigger a re-merge.</p>
+                        <div id="quarantine-list" class="quarantine-list muted">loading...</div>
+                    </section>
                 </div>
             </div>
         </div>

@@ -415,6 +415,41 @@ main {
 .key-table button:hover { background: #2d3441; color: #ff7b72; }
 .key-table tr.disabled td { color: #8b949e; opacity: 0.6; }
 
+/* Zone-cleanup section: dropdown is wider than mint-name's 35% so the
+   long zone keys (X1_Undercity_BugCave, etc.) don't get truncated. */
+.reset-zone-select {
+    flex: 1;
+    background: #0d1117; color: #d6dde6;
+    border: 1px solid #30363d; border-radius: 3px;
+    padding: 0.3rem 0.4rem; font-size: 0.82rem;
+    font-family: Consolas, monospace;
+}
+
+/* Quarantine list: collapsible per uploader so a busy quarantine
+   directory doesn't dominate the modal. */
+.quarantine-list {
+    max-height: 240px; overflow-y: auto;
+    border: 1px solid #21262d; border-radius: 3px;
+    padding: 0.4rem; background: #0d1117;
+    font-size: 0.78rem;
+}
+.quarantine-group {
+    margin-bottom: 0.3rem;
+}
+.quarantine-group summary {
+    cursor: pointer; padding: 0.15rem 0.2rem;
+    color: #d6dde6; font-weight: 500;
+}
+.quarantine-group summary:hover { color: #79c0ff; }
+.quarantine-files {
+    list-style: none; padding-left: 1.2rem; margin: 0.2rem 0;
+}
+.quarantine-files li {
+    padding: 0.05rem 0; font-family: Consolas, monospace;
+    color: #8b949e;
+}
+.quarantine-files li code { color: #d6dde6; }
+
 .diamond {
     width: 10px;
     height: 10px;

@@ -55,6 +55,11 @@ const D = {
     mintGo:       document.getElementById('mint-go'),
     mintResult:   document.getElementById('mint-result'),
     keyTableBody: document.getElementById('key-table-body'),
+    resetZoneSelect: document.getElementById('reset-zone-select'),
+    resetZoneGo:     document.getElementById('reset-zone-go'),
+    resetResult:     document.getElementById('reset-result'),
+    quarantineList:  document.getElementById('quarantine-list'),
+    quarantineCount: document.getElementById('quarantine-count'),
 };
 const ctx = D.canvas.getContext('2d');
 
@@ -132,6 +137,7 @@ const ACTOR_STYLE = {
     dungeon_entrance:        { c: '#ff66cc', sym: 'D',  label: 'Dungeon' },
     pit_exit:                { c: '#ffd700', sym: 'X',  label: 'Pit Exit' },
     pit_floor_portal:        { c: '#ff8c00', sym: 'F',  label: 'Pit Floor' },
+    undercity_exit:          { c: '#ffd700', sym: 'U',  label: 'UC Exit' },
     traversal:               { c: '#88ddff', sym: 't',  label: 'Trav' },
     waypoint:                { c: '#88ff88', sym: 'W',  label: 'Waypoint' },
     stash:                   { c: '#ddddff', sym: 'S',  label: 'Stash' },
@@ -161,6 +167,7 @@ const KIND_OVERRIDES = {
     portal_town:'Town Portal', portal_helltide:'Helltide Portal',
     dungeon_entrance:'Dungeon Entrance', pit_exit:'Pit Exit',
     pit_floor_portal:'Pit Floor Portal',
+    undercity_exit:'Undercity Floor Switch',
     objective:'Objective', enticement:'Beacon',
 };
 
@@ -937,6 +944,8 @@ function openAdmin() {
         D.adminAuth.hidden = true;
         D.adminPanel.hidden = false;
         loadKeyTable();
+        loadResetZoneList();
+        loadQuarantineList();
     } else {
         D.adminAuth.hidden = false;
         D.adminPanel.hidden = true;
@@ -956,6 +965,8 @@ D.adminKeySave.addEventListener('click', async () => {
     D.adminAuth.hidden = true;
     D.adminPanel.hidden = false;
     loadKeyTable();
+    loadResetZoneList();
+    loadQuarantineList();
 });
 
 async function loadKeyTable() {
@@ -1002,6 +1013,111 @@ async function keyAction(act, name) {
     if (!r.ok) { alert('Failed: HTTP ' + r.status); return; }
     await loadKeyTable();
     await refreshUploaders();
+}
+
+// ---- Zone cleanup -------------------------------------------------------
+//
+// Populate the dropdown from the public /zones list (same one the sidebar
+// uses).  We re-fetch on every admin open so newly-created zones show up
+// without a viewer reload.
+async function loadResetZoneList() {
+    try {
+        const r = await fetch('/zones');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const zones = (d.zones || []).slice().sort();
+        D.resetZoneSelect.innerHTML =
+            '<option value="">-- pick a zone --</option>' +
+            zones.map(z => `<option value="${esc(z)}">${esc(z)}</option>`).join('');
+    } catch (e) {
+        D.resetZoneSelect.innerHTML = `<option value="">(error: ${esc(e.message)})</option>`;
+    }
+}
+
+D.resetZoneGo.addEventListener('click', async () => {
+    const key = D.resetZoneSelect.value;
+    if (!key) {
+        D.resetResult.textContent = 'pick a zone first';
+        return;
+    }
+    const ok = confirm(
+        `Reset zone "${key}"?\n\n` +
+        `This will:\n` +
+        `  - quarantine every dump that contributed to this zone\n` +
+        `  - delete the merged JSON\n` +
+        `  - trigger a re-merge\n\n` +
+        `The zone disappears until someone records new sessions for it.\n` +
+        `Quarantined dumps stay on disk in quarantine/ for audit.\n\n` +
+        `Continue?`
+    );
+    if (!ok) return;
+    D.resetResult.textContent = 'resetting...';
+    const r = await adminFetch('/admin/zone_reset/' + encodeURIComponent(key), { method: 'POST' });
+    if (!r.ok) {
+        D.resetResult.textContent = `error: HTTP ${r.status}`;
+        return;
+    }
+    const d = await r.json();
+    D.resetResult.innerHTML =
+        `<div><b>Reset ${esc(key)}</b></div>` +
+        `<div>quarantined ${d.count} dump(s)` +
+            (d.merged_json_deleted ? ', deleted merged JSON' : ', no merged JSON existed') +
+            (d.scan_errors ? `, ${d.scan_errors} dump(s) unreadable` : '') +
+        `</div>` +
+        `<div class="muted">Re-merge running in background.  Refresh in a few seconds.</div>`;
+    // Refresh views that may have changed
+    await loadResetZoneList();
+    await loadQuarantineList();
+    // Nudge the sidebar so the user sees the deleted zone disappear without
+    // waiting for the next auto-refresh tick.
+    try { await refreshZoneList(); } catch (_) { /* ignore */ }
+});
+
+// ---- Quarantine list ----------------------------------------------------
+async function loadQuarantineList() {
+    try {
+        const r = await adminFetch('/admin/quarantine');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const items = d.items || [];
+        D.quarantineCount.textContent = items.length ? `(${items.length})` : '(empty)';
+        if (!items.length) {
+            D.quarantineList.textContent = 'Nothing in quarantine.';
+            return;
+        }
+        // Each entry is either a string filename or {name, size, mtime}.
+        // Group by uploader prefix (everything before the first __).
+        const grouped = {};
+        for (const it of items) {
+            const name = typeof it === 'string' ? it : it.name;
+            const m = name && name.match(/^([^_]+)__/);
+            const uploader = m ? m[1] : '(unknown)';
+            (grouped[uploader] = grouped[uploader] || []).push(it);
+        }
+        const html = Object.entries(grouped)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([up, list]) => `
+                <details class="quarantine-group">
+                    <summary>${esc(up)} <span class="muted">(${list.length})</span></summary>
+                    <ul class="quarantine-files">${
+                        list.map(it => {
+                            const name = typeof it === 'string' ? it : it.name;
+                            const size = (typeof it === 'object' && it.size != null)
+                                ? ` <span class="muted">${prettyBytes(it.size)}</span>` : '';
+                            return `<li><code>${esc(name)}</code>${size}</li>`;
+                        }).join('')
+                    }</ul>
+                </details>`).join('');
+        D.quarantineList.innerHTML = html;
+    } catch (e) {
+        D.quarantineList.textContent = 'error: ' + e.message;
+    }
+}
+
+function prettyBytes(n) {
+    if (n < 1024)        return n + ' B';
+    if (n < 1024*1024)   return (n/1024).toFixed(1) + ' KB';
+    return (n/(1024*1024)).toFixed(1) + ' MB';
 }
 
 D.mintGo.addEventListener('click', async () => {
