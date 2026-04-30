@@ -271,6 +271,11 @@ main {
 .hdr-btn:hover { background: #2d3441; }
 
 /* ---- Modal ---- */
+/* Global [hidden] override -- elements with explicit `display: flex/grid`
+   need this or the `hidden` attribute does nothing.  Bites the modal
+   and the actor-panel below. */
+[hidden] { display: none !important; }
+
 .modal {
     position: fixed; inset: 0;
     background: rgba(0,0,0,0.6);
