@@ -31,6 +31,10 @@ const D = {
     tooltip:      document.getElementById('hover-tooltip'),
     floorCtl:     document.getElementById('floor-controls'),
     floorSelect:  document.getElementById('floor-select'),
+    orientRotate: document.getElementById('orient-rotate'),
+    orientFlipX:  document.getElementById('orient-flipx'),
+    orientFlipY:  document.getElementById('orient-flipy'),
+    orientState:  document.getElementById('orient-state'),
     actorPanel:   document.getElementById('actor-panel'),
     actorBody:    document.getElementById('actor-panel-body'),
     actorClose:   document.getElementById('actor-panel-close'),
@@ -75,7 +79,43 @@ const S = {
     cellSet:       null,        // Set of "cx,cy" walkable cells (for the active floor)
     cellRes:       0.5,
     adminKey:      localStorage.getItem('warmap_admin_key') || '',
+    // Orientation: world-axis -> canvas-axis transform.  D4's coord system
+    // doesn't map cleanly to "north up", so we let the user dial it in.
+    // rot:   90deg increments clockwise (0|1|2|3)
+    // flipX: mirror cell X axis
+    // flipY: mirror cell Y axis
+    orient: JSON.parse(localStorage.getItem('warmap_orient') || '{}') || {},
 };
+S.orient.rot   = S.orient.rot   ?? 0;
+S.orient.flipX = S.orient.flipX ?? false;
+S.orient.flipY = S.orient.flipY ?? false;
+
+function saveOrient() {
+    localStorage.setItem('warmap_orient', JSON.stringify({
+        rot: S.orient.rot, flipX: S.orient.flipX, flipY: S.orient.flipY,
+    }));
+}
+
+// Map a (cellX, cellY) pair through the user's orientation choice.  The
+// caller still subtracts bbox.minx/miny -- this is the rotation around
+// the bbox center.  Returns transformed cell-space coords (still ints
+// after rotation since we rotate by 90deg multiples).
+function applyOrient(cx, cy, bbox) {
+    let x = cx, y = cy;
+    if (S.orient.flipX) x = bbox.minx + (bbox.maxx - x);
+    if (S.orient.flipY) y = bbox.miny + (bbox.maxy - y);
+    const r = ((S.orient.rot % 4) + 4) % 4;
+    if (r === 0) return { x, y };
+    // Rotate around the bbox center
+    const cxC = (bbox.minx + bbox.maxx) / 2;
+    const cyC = (bbox.miny + bbox.maxy) / 2;
+    const dx = x - cxC, dy = y - cyC;
+    let rx, ry;
+    if (r === 1)      { rx =  dy; ry = -dx; }   // 90 cw
+    else if (r === 2) { rx = -dx; ry = -dy; }   // 180
+    else              { rx = -dy; ry =  dx; }   // 270 cw
+    return { x: cxC + rx, y: cyC + ry };
+}
 
 // ---- Actor styling -------------------------------------------------------
 const ACTOR_STYLE = {
@@ -357,6 +397,29 @@ D.floorSelect.addEventListener('change', e => {
     render();
 });
 
+function refreshOrientState() {
+    const r = S.orient.rot * 90;
+    const parts = [`rot ${r}°`];
+    if (S.orient.flipX) parts.push('flipX');
+    if (S.orient.flipY) parts.push('flipY');
+    D.orientState.textContent = parts.join(' · ');
+    D.orientFlipX.classList.toggle('armed', S.orient.flipX);
+    D.orientFlipY.classList.toggle('armed', S.orient.flipY);
+}
+D.orientRotate.addEventListener('click', () => {
+    S.orient.rot = (S.orient.rot + 1) % 4;
+    saveOrient(); refreshOrientState(); render();
+});
+D.orientFlipX.addEventListener('click', () => {
+    S.orient.flipX = !S.orient.flipX;
+    saveOrient(); refreshOrientState(); render();
+});
+D.orientFlipY.addEventListener('click', () => {
+    S.orient.flipY = !S.orient.flipY;
+    saveOrient(); refreshOrientState(); render();
+});
+refreshOrientState();
+
 // ---- Canvas rendering ----------------------------------------------------
 function bboxOfCells(cells) {
     let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
@@ -382,7 +445,20 @@ function render() {
         ctx.fillText('(no cells on this floor)', 20, 24);
         return;
     }
-    const bbox = bboxOfCells(cells);
+    const rawBbox = bboxOfCells(cells);
+    // Transform every corner of rawBbox to find the post-orient bbox.
+    const corners = [
+        applyOrient(rawBbox.minx, rawBbox.miny, rawBbox),
+        applyOrient(rawBbox.maxx, rawBbox.miny, rawBbox),
+        applyOrient(rawBbox.minx, rawBbox.maxy, rawBbox),
+        applyOrient(rawBbox.maxx, rawBbox.maxy, rawBbox),
+    ];
+    const bbox = {
+        minx: Math.min(...corners.map(c => c.x)),
+        miny: Math.min(...corners.map(c => c.y)),
+        maxx: Math.max(...corners.map(c => c.x)),
+        maxy: Math.max(...corners.map(c => c.y)),
+    };
     const pad = 20;
     const dx = bbox.maxx - bbox.minx + 1;
     const dy = bbox.maxy - bbox.miny + 1;
@@ -390,13 +466,14 @@ function render() {
     const scale = fitScale * S.view.scale;
     const offX = (w - dx*scale)/2 + S.view.panX - bbox.minx*scale;
     const offY = (h - dy*scale)/2 + S.view.panY - bbox.miny*scale;
-    drawState = { bbox, scale, offX, offY };
+    drawState = { bbox, rawBbox, scale, offX, offY };
 
     const cellSize = Math.max(1, scale);
     for (const c of cells) {
-        const cx = c[0], cy = c[1], walk = c[2], conf = c[3];
-        const x = offX + cx*scale;
-        const y = (h - offY) - cy*scale - cellSize;
+        const t = applyOrient(c[0], c[1], rawBbox);
+        const walk = c[2], conf = c[3];
+        const x = offX + t.x*scale;
+        const y = (h - offY) - t.y*scale - cellSize;
         ctx.fillStyle = walk
             ? `rgba(63, 185, 80, ${0.35 + 0.65*conf})`
             : `rgba(207, 52, 52, ${0.35 + 0.65*conf})`;
@@ -411,8 +488,8 @@ function render() {
     for (const a of actors) {
         if (typeof a.x !== 'number') continue;
         if (a.x === 0 && a.y === 0) continue;
-        const ax = a.x / cellRes, ay = a.y / cellRes;
-        const x = offX + ax*scale, y = (h - offY) - ay*scale;
+        const t = applyOrient(a.x / cellRes, a.y / cellRes, rawBbox);
+        const x = offX + t.x*scale, y = (h - offY) - t.y*scale;
         const style = ACTOR_STYLE[a.kind] || { c:'#999', sym:'?' };
         const isSel = (a === S.selectedActor), isHov = (a === S.hoveredActor);
         if (isSel || isHov) {
@@ -448,15 +525,17 @@ function render() {
             ctx.beginPath();
             for (let i = 0; i < samples.length; i++) {
                 const s = samples[i];
-                const sx = offX + (s.x / cellRes) * scale;
-                const sy = (h - offY) - (s.y / cellRes) * scale;
+                const tt = applyOrient(s.x / cellRes, s.y / cellRes, rawBbox);
+                const sx = offX + tt.x * scale;
+                const sy = (h - offY) - tt.y * scale;
                 if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
             }
             ctx.strokeStyle = t.complete ? 'rgba(255, 200, 60, 0.65)' : 'rgba(80, 220, 140, 0.85)';
             ctx.lineWidth = 2; ctx.stroke();
             const last = samples[samples.length - 1];
-            const lx = offX + (last.x / cellRes) * scale;
-            const ly = (h - offY) - (last.y / cellRes) * scale;
+            const lt = applyOrient(last.x / cellRes, last.y / cellRes, rawBbox);
+            const lx = offX + lt.x * scale;
+            const ly = (h - offY) - lt.y * scale;
             ctx.beginPath();
             ctx.fillStyle = t.complete ? '#ffc83c' : '#3fff8b';
             ctx.arc(lx, ly, 4, 0, 2*Math.PI); ctx.fill();
@@ -471,8 +550,9 @@ function render() {
         ctx.beginPath();
         for (let i = 0; i < S.pathPath.length; i++) {
             const c = S.pathPath[i];
-            const px = offX + c.cx * scale + scale/2;
-            const py = (h - offY) - c.cy * scale - scale/2;
+            const t = applyOrient(c.cx, c.cy, rawBbox);
+            const px = offX + t.x * scale + scale/2;
+            const py = (h - offY) - t.y * scale - scale/2;
             if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
         }
         ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 2; ctx.stroke();
@@ -482,8 +562,9 @@ function render() {
 function drawWorldDot(p, color, label) {
     const h = D.canvas.height;
     const cellRes = S.cellRes;
-    const px = drawState.offX + (p.wx / cellRes) * drawState.scale;
-    const py = (h - drawState.offY) - (p.wy / cellRes) * drawState.scale;
+    const t = applyOrient(p.wx / cellRes, p.wy / cellRes, drawState.rawBbox);
+    const px = drawState.offX + t.x * drawState.scale;
+    const py = (h - drawState.offY) - t.y * drawState.scale;
     ctx.beginPath(); ctx.arc(px, py, 6, 0, 2*Math.PI);
     ctx.fillStyle = color; ctx.fill();
     ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke();
@@ -503,9 +584,29 @@ function canvasFromEvent(e) {
 function canvasToWorld(cx, cy) {
     if (!drawState) return null;
     const h = D.canvas.height;
-    const wx_cells = (cx - drawState.offX) / drawState.scale;
-    const wy_cells = ((h - drawState.offY) - cy) / drawState.scale;
-    return { wx: wx_cells * S.cellRes, wy: wy_cells * S.cellRes };
+    // Step 1: canvas -> post-orient cell coords
+    const tx = (cx - drawState.offX) / drawState.scale;
+    const ty = ((h - drawState.offY) - cy) / drawState.scale;
+    // Step 2: invert the orient transform to get raw cell coords
+    const inv = invertOrient(tx, ty, drawState.rawBbox);
+    return { wx: inv.x * S.cellRes, wy: inv.y * S.cellRes };
+}
+
+function invertOrient(tx, ty, bbox) {
+    // Inverse of applyOrient: undo rotation, then undo flip.
+    let x = tx, y = ty;
+    const r = ((S.orient.rot % 4) + 4) % 4;
+    if (r !== 0) {
+        const cxC = (bbox.minx + bbox.maxx) / 2;
+        const cyC = (bbox.miny + bbox.maxy) / 2;
+        const dx = x - cxC, dy = y - cyC;
+        if      (r === 1) { x = cxC - dy; y = cyC + dx; }   // inverse of 90 cw
+        else if (r === 2) { x = cxC - dx; y = cyC - dy; }
+        else              { x = cxC + dy; y = cyC - dx; }
+    }
+    if (S.orient.flipY) y = bbox.miny + (bbox.maxy - y);
+    if (S.orient.flipX) x = bbox.minx + (bbox.maxx - x);
+    return { x, y };
 }
 function pickActor(cx, cy) {
     if (!drawState || !drawState.hits) return null;

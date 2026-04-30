@@ -70,9 +70,17 @@
                         <div id="actor-panel-body"></div>
                     </aside>
                 </div>
-                <div class="floor-controls" id="floor-controls" hidden>
-                    Floor:
-                    <select id="floor-select"></select>
+                <div class="floor-controls">
+                    <span id="floor-controls" hidden>Floor:
+                        <select id="floor-select"></select>
+                    </span>
+                    <span class="orient-controls">
+                        Orient:
+                        <button id="orient-rotate" class="orient-btn" title="Rotate 90 deg clockwise">90°</button>
+                        <button id="orient-flipx"  class="orient-btn" title="Mirror X axis">flip X</button>
+                        <button id="orient-flipy"  class="orient-btn" title="Mirror Y axis">flip Y</button>
+                        <span id="orient-state" class="muted"></span>
+                    </span>
                 </div>
                 <div class="legend">
                     <span class="legend-item"><span class="swatch walkable"></span>walkable</span>
