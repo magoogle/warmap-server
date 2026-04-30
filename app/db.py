@@ -312,6 +312,31 @@ class DB:
             ORDER BY last_active DESC
         """)
 
+    def list_live_zones(self) -> list[sqlite3.Row]:
+        """Aggregate IN-PROGRESS sessions by zone.  Returns zones that
+        have at least one uploader actively recording right now (no
+        footer line yet => session is open).  The viewer uses this to
+        paint a 'live' indicator next to each zone in the sidebar so
+        users can see at a glance which zones have fresh data flowing.
+
+        Filters complete=0 only -- finished sessions don't count.  We
+        also surface count + last_active so the viewer can fade the
+        indicator out for zones whose 'live' session went stale (e.g.
+        the recorder crashed without writing a footer; the row stays
+        complete=0 forever and the timestamp is the only signal).
+        """
+        return self.query("""
+            SELECT
+                zone,
+                COUNT(*)                                 AS in_progress,
+                COUNT(DISTINCT client_id)                AS uploaders,
+                MAX(mtime)                               AS last_active
+            FROM sessions
+            WHERE complete = 0 AND zone IS NOT NULL AND zone != ''
+            GROUP BY zone
+            ORDER BY last_active DESC
+        """)
+
     # ============================================================
     # Uploads (audit trail)
     # ============================================================

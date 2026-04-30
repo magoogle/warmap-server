@@ -890,6 +890,40 @@ def list_uploaders():
     return {'uploaders': out, 'count': len(out)}
 
 
+# Zones currently receiving in-progress uploads.  The viewer polls this
+# alongside /status so it can paint a "LIVE" indicator next to each
+# active zone in the sidebar.  Cheap query (single GROUP BY on the
+# sessions index, complete=0 filter), so we don't gate it behind a
+# longer poll interval -- runs at the same 5s cadence as /status.
+#
+# Staleness:  a session is "in progress" until the recorder writes a
+# footer line.  If the recorder crashes mid-record there's no footer,
+# and the row stays complete=0 forever.  To keep the indicator from
+# lying about a long-dead session, we apply a wall-clock cutoff on
+# last_active here -- anything older than LIVE_STALE_SECONDS gets
+# dropped from the response.
+LIVE_STALE_SECONDS = 300       # 5 min: recorder uploads every ~60s
+
+@app.get('/live-zones')
+@_LIMITER.limit('120/minute')
+def list_live_zones(request: Request,
+                    x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    rows = DBI.list_live_zones()
+    cutoff = time.time() - LIVE_STALE_SECONDS
+    zones: dict[str, dict] = {}
+    for r in rows:
+        last = r['last_active'] or 0
+        if last < cutoff:
+            continue
+        zones[r['zone']] = {
+            'in_progress': r['in_progress'],
+            'uploaders':   r['uploaders'],
+            'last_active': last,
+        }
+    return {'zones': zones, 'count': len(zones), 'stale_after_s': LIVE_STALE_SECONDS}
+
+
 @app.post('/upload')
 @_LIMITER.limit('60/minute')
 async def upload(

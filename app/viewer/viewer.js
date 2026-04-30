@@ -77,6 +77,10 @@ const S = {
     selectedActor: null,
     hoveredActor:  null,
     zoneList:      [],
+    // Map zone-key -> { in_progress, uploaders, last_active }.  Refreshed
+    // every status-poll cycle from /live-zones.  Empty object means
+    // "no zones are currently live" (or we haven't fetched yet).
+    liveZones:     {},
     uploaders:     [],
     activeUploader:null,
     uploaderTracks:{},          // dump_name -> { zone, samples, complete, activity }
@@ -579,6 +583,12 @@ async function refreshStatus() {
             await refreshUploaders();
             if (S.currentKey) await loadZone(S.currentKey, false);
         }
+        // Live-zone indicator update: cheap (one indexed query on the
+        // sessions table), runs every poll regardless of merge state
+        // so the LIVE badge appears within ~5s of someone starting a
+        // recording.  Independent of the merge timestamp because new
+        // uploads predate the next merge by definition.
+        await refreshLiveZones();
     } catch (e) {
         if (D.state) D.state.textContent = `disconnected: ${e.message}`;
         // Auth failures specifically: show the sign-in overlay rather than
@@ -596,6 +606,27 @@ async function refreshZoneList() {
         S.zoneList = (z.zones || []).filter(k => !k.startsWith('_') && k !== 'coverage');
         D.zoneCount.textContent = `(${S.zoneList.length})`;
         renderZoneList();
+    } catch {}
+}
+
+// Pull the live-zones map (zones with in-progress uploads right now).
+// Re-renders the sidebar so the LIVE badge shows up immediately --
+// the user shouldn't have to wait for the next merge cycle to see
+// that someone just started recording in a zone.  Failures swallowed;
+// a missing live-indicator is strictly better than a broken sidebar.
+async function refreshLiveZones() {
+    try {
+        const r = await getJSON('/live-zones');
+        const next = r.zones || {};
+        // Only re-render when the *set* of live keys changes (or any
+        // count flipped).  Avoids the whole zone list re-painting every
+        // 5s on a server with steady live data.
+        const oldKeys = Object.keys(S.liveZones).sort().join('|');
+        const newKeys = Object.keys(next).sort().join('|');
+        const oldCounts = Object.entries(S.liveZones).map(([k, v]) => `${k}:${v.in_progress}`).sort().join('|');
+        const newCounts = Object.entries(next).map(([k, v]) => `${k}:${v.in_progress}`).sort().join('|');
+        S.liveZones = next;
+        if (oldKeys !== newKeys || oldCounts !== newCounts) renderZoneList();
     } catch {}
 }
 
@@ -669,6 +700,36 @@ function renderZoneList() {
                           : key;
             n.title = key;     // full key always visible on hover
             li.appendChild(n);
+
+            // LIVE indicator: pulsing dot + count.  Inserted only when
+            // /live-zones reports an in-progress session for this key
+            // (filtered to last_active >= now-300s server-side, so we
+            // can trust the presence here).  Tooltip shows uploader
+            // count + how recently the last sample landed.
+            const live = S.liveZones && S.liveZones[key];
+            if (live) {
+                const badge = document.createElement('span');
+                badge.className = 'zone-live-badge';
+                const dot = document.createElement('span');
+                dot.className = 'live-dot';
+                badge.appendChild(dot);
+                const lbl = document.createElement('span');
+                lbl.className = 'live-label';
+                // Count -- usually 1, but show explicit number when
+                // multiple uploaders are simultaneously in this zone
+                // (rare but possible during synchronous group play).
+                lbl.textContent = live.in_progress > 1
+                    ? `LIVE x${live.in_progress}`
+                    : 'LIVE';
+                badge.appendChild(lbl);
+                badge.title =
+                    `Active recording: ${live.in_progress} session${live.in_progress === 1 ? '' : 's'} ` +
+                    `from ${live.uploaders} uploader${live.uploaders === 1 ? '' : 's'} ` +
+                    `(last sample ${prettyAgo(live.last_active)})`;
+                li.appendChild(badge);
+                li.classList.add('has-live');
+            }
+
             li.addEventListener('click', () => loadZone(key, true));
             ul.appendChild(li);
         }

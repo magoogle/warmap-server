@@ -179,6 +179,60 @@ main {
     box-shadow: inset 2px 0 0 0 var(--accent);
 }
 
+/* ---- LIVE indicator on zones with active uploads ----
+   Lights up when /live-zones reports an in-progress session for this
+   key.  Pulsing red dot -- visually loud enough to spot in a long
+   sidebar without being so loud the rest of the UI fades.  Lays out
+   as a row alongside the zone name (li becomes flex when .has-live
+   is set so the dot doesn't push the name's vertical alignment). */
+.zone-list li.has-live {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+.zone-list li.has-live .zone-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.zone-live-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex: 0 0 auto;
+    padding: 0.1rem 0.4rem 0.1rem 0.3rem;
+    border-radius: 999px;
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid rgba(248, 81, 73, 0.35);
+    color: #ff8b85;
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    line-height: 1;
+}
+.zone-live-badge .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #f85149;
+    box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.65);
+    animation: live-pulse 1.6s ease-out infinite;
+}
+@keyframes live-pulse {
+    0%   { box-shadow: 0 0 0 0   rgba(248, 81, 73, 0.65); }
+    70%  { box-shadow: 0 0 0 6px rgba(248, 81, 73, 0);    }
+    100% { box-shadow: 0 0 0 0   rgba(248, 81, 73, 0);    }
+}
+/* Kill the pulse for users who prefer reduced motion -- the dot is
+   still red, still visible, just not animating.  Required by some
+   accessibility checklists. */
+@media (prefers-reduced-motion: reduce) {
+    .zone-live-badge .live-dot { animation: none; }
+}
+
 .zone-list .zone-name {
     font-weight: 500;
     font-size: 0.9rem;
