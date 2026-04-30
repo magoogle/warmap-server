@@ -610,11 +610,10 @@ def _viewer_asset_version() -> str:
 
 
 if _VIEWER_DIR.exists():
-    # Static mount for everything under /viewer/* EXCEPT the bare index --
-    # the index has its own dynamic route below.
-    app.mount('/viewer', _NoCacheStaticFiles(directory=str(_VIEWER_DIR), html=False),
-              name='viewer')
-
+    # IMPORTANT: register the explicit /viewer + /viewer/ routes BEFORE
+    # the catch-all mount.  Starlette resolves routes in registration
+    # order; if the mount goes first, it intercepts /viewer/ and our
+    # cache-busting handler never runs.
     @app.get('/viewer/', include_in_schema=False)
     @app.get('/viewer',  include_in_schema=False)
     def _viewer_index():
@@ -636,6 +635,12 @@ if _VIEWER_DIR.exists():
                 'Expires':       '0',
             },
         )
+
+    # Static mount for everything under /viewer/* (the .css, .js, etc.).
+    # html=False so the mount doesn't try to auto-resolve index.html --
+    # the explicit route above handles that.
+    app.mount('/viewer', _NoCacheStaticFiles(directory=str(_VIEWER_DIR), html=False),
+              name='viewer')
 
 
 @app.get('/')
