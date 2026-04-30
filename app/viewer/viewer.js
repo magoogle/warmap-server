@@ -130,6 +130,7 @@ const ACTOR_STYLE = {
     portal_town:             { c: '#79c0ff', sym: 'T',  label: 'TownPortal' },
     portal_helltide:         { c: '#ff5544', sym: 'H',  label: 'HellPortal' },
     dungeon_entrance:        { c: '#ff66cc', sym: 'D',  label: 'Dungeon' },
+    pit_exit:                { c: '#ffd700', sym: 'X',  label: 'Pit Exit' },
     traversal:               { c: '#88ddff', sym: 't',  label: 'Trav' },
     waypoint:                { c: '#88ff88', sym: 'W',  label: 'Waypoint' },
     stash:                   { c: '#ddddff', sym: 'S',  label: 'Stash' },
@@ -157,7 +158,8 @@ const KIND_OVERRIDES = {
     glyph_gizmo:'Glyph Gizmo', bounty_npc:'Raven', stash:'Stash',
     waypoint:'Waypoint', pyre:'Pyre', traversal:'Traversal', portal:'Portal',
     portal_town:'Town Portal', portal_helltide:'Helltide Portal',
-    dungeon_entrance:'Dungeon Entrance', objective:'Objective', enticement:'Beacon',
+    dungeon_entrance:'Dungeon Entrance', pit_exit:'Pit Exit',
+    objective:'Objective', enticement:'Beacon',
 };
 
 function actorDisplayName(a) {
