@@ -482,9 +482,42 @@ def _run_merge() -> dict:
                 _last_merge['finished_at'] = time.time()
                 _last_merge['duration_s'] = (
                     _last_merge['finished_at'] - _last_merge['started_at'])
+                # Persist to disk so the OTHER 11 uvicorn workers (who
+                # never run the merge themselves -- only the scheduler-
+                # lock holder does) can show the same fresh last-merge
+                # info on /status.  Without this, /status was returning
+                # null finished_at for any request that happened to hit
+                # a non-scheduler worker.
+                _persist_last_merge()
             return {'ok': True, 'last_merge': _last_merge.copy()}
     finally:
         _merge_lock.release()
+
+
+_LAST_MERGE_FILE = ROOT / 'last_merge.json'
+
+
+def _persist_last_merge() -> None:
+    """Write _last_merge to disk so non-scheduler workers can read it
+    on /status.  Atomic via tmp + rename.  Cheap (<1KB)."""
+    try:
+        tmp = _LAST_MERGE_FILE.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(_last_merge), encoding='utf-8')
+        tmp.replace(_LAST_MERGE_FILE)
+    except OSError:
+        pass
+
+
+def _read_last_merge() -> dict:
+    """/status helper -- prefer the worker's own _last_merge if it has
+    a finished_at (means THIS worker ran the merge), else fall back to
+    the shared on-disk copy."""
+    if _last_merge.get('finished_at'):
+        return _last_merge
+    try:
+        return json.loads(_LAST_MERGE_FILE.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return _last_merge
 
 
 def _refresh_db_from_disk(merge_state: dict) -> None:
@@ -665,12 +698,12 @@ def root():
     # Redirect bare hits to the viewer if it's available; otherwise show health.
     if _VIEWER_DIR.exists():
         return RedirectResponse('/viewer/')
-    return {'status': 'ok', 'last_merge': _last_merge}
+    return {'status': 'ok', 'last_merge': _read_last_merge()}
 
 
 @app.get('/health')
 def health():
-    return {'status': 'ok', 'last_merge': _last_merge}
+    return {'status': 'ok', 'last_merge': _read_last_merge()}
 
 
 @app.get('/status')
@@ -680,7 +713,11 @@ def status():
     return {
         'dumps_count':  len(dumps),
         'zones_count':  len([z for z in zones if not z.name.startswith('_')]),
-        'last_merge':   _last_merge,
+        # Read from disk-shared copy so non-scheduler workers also have
+        # a fresh last-merge timestamp -- otherwise /status flickered
+        # between 'X s ago' (scheduler worker) and 'never' (everyone
+        # else) depending on which worker handled the request.
+        'last_merge':   _read_last_merge(),
         'sample_zones': [z.stem for z in zones if not z.name.startswith('_')][:20],
     }
 
