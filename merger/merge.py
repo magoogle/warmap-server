@@ -319,6 +319,33 @@ def _get_or_create(state: dict[str, KeyAgg], key: str, key_type: str) -> KeyAgg:
     return state[key]
 
 
+# Skins we never emit into the merged actor catalog -- transient props
+# whose position is meaningless for pathing (they spawn wherever a kill /
+# event happened, then despawn).  Mirrors the recorder-side list in
+# WarMapRecorder/core/actor_capture.lua's SKIN_IGNORE_SUBSTR.  Filtering
+# at merge time means re-merging existing dumps removes these from the
+# emitted zone JSONs and the actor index, without needing to re-collect
+# data after the recorder is updated.
+#
+# Substring match (`s in skin`) -- pattern entries catch all variants.
+_SKIN_IGNORE_SUBSTR = (
+    # Pit-boss paragon-glyph upgrade gizmo: spawns at the boss kill location,
+    # which is random per-run.  All three known variants:
+    'Gizmo_Paragon_Glyph_Upgrade',
+    'EGD_MSWK_GlyphUpgrade',
+    'Pit_Glyph',
+    # Floor pickups -- spawn at random kill positions, consumed-on-pickup.
+    #   HealthPot_Dose_Pickup            (type_id 30631106,   sno_id 47186448)
+    #   Sorcerer_CracklingEnergy_Pickup  (type_id 1385506706, sno_id 72352155)
+    'HealthPot_Dose_Pickup',
+    'Sorcerer_CracklingEnergy_Pickup',
+)
+
+
+def _is_ignored_skin(skin: str) -> bool:
+    return any(s in skin for s in _SKIN_IGNORE_SUBSTR)
+
+
 def _vote_cell(cell_map: dict[CellKey, CellAgg], cx: int, cy: int, w: int) -> None:
     # Defensive filter: drop cells within ~5m of world (0,0).  Older
     # recorder versions wrote bogus probe-target cells around origin
@@ -337,15 +364,7 @@ def _merge_actor(actors: dict[ActorKey, ActorAgg], a: dict, session_id: str) -> 
     skin = a.get('skin')
     if not skin:
         return
-    # Drop actors whose position is meaningless for pathing (they spawn
-    # wherever a transient world event happened -- e.g. the pit-boss
-    # paragon-glyph upgrade gizmo spawns at the boss kill location, which
-    # is essentially random per-run).  Filter at merge time so re-merging
-    # also cleans them out of any existing dumps that pre-date the
-    # recorder-side filter in actor_capture.lua's SKIN_IGNORE_SUBSTR.
-    if 'Gizmo_Paragon_Glyph_Upgrade' in skin \
-       or 'EGD_MSWK_GlyphUpgrade' in skin \
-       or 'Pit_Glyph' in skin:
+    if _is_ignored_skin(skin):
         return
     rx = round(a.get('x', 0))
     ry = round(a.get('y', 0))
