@@ -32,7 +32,7 @@
                 <input type="checkbox" id="auto-refresh" checked />
                 Auto-refresh
             </label>
-            <button id="admin-btn" class="hdr-btn" title="Admin: manage keys / quarantine">Admin</button>
+            <button id="admin-btn" class="hdr-btn" title="Admin: manage keys / quarantine" data-admin-only="1">Admin</button>
         </div>
     </header>
 
@@ -52,7 +52,7 @@
             <div class="tabs">
                 <button class="tab active" data-tab="zones">Zones</button>
                 <button class="tab"        data-tab="layers">Layers</button>
-                <button class="tab"        data-tab="uploaders">Uploaders</button>
+                <button class="tab"        data-tab="uploaders" data-admin-only="1">Uploaders</button>
                 <button class="tab"        data-tab="path">Path</button>
             </div>
 
@@ -97,6 +97,10 @@
                 <header class="zone-header">
                     <h2 id="zone-title"></h2>
                     <div id="zone-meta" class="zone-meta"></div>
+                    <button id="zone-download" class="hdr-btn zone-download-btn"
+                            title="Download this zone's merged JSON file" hidden>
+                        Download
+                    </button>
                 </header>
                 <div class="canvas-wrap">
                     <canvas id="zone-canvas" width="1024" height="1024"></canvas>

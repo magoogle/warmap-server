@@ -231,10 +231,35 @@ main {
     margin-bottom: 0.6rem;
 }
 
+.zone-header {
+    align-items: center;
+    gap: 0.6rem;
+}
 .zone-header h2 {
     margin: 0;
     font-size: 1.05rem;
 }
+.zone-download-btn {
+    margin-left: auto;
+    padding: 0.32rem 0.7rem;
+    font-size: 0.78rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+.zone-download-btn::before {
+    content: '\2193';     /* downward arrow */
+    font-weight: 700;
+    font-size: 0.95rem;
+    line-height: 1;
+}
+
+/* Tier gating: any element marked data-admin-only is hidden when the
+   current user isn't an admin.  JS toggles this class on <body>; the
+   CSS rule does the actual hiding.  This way a slow /whoami response
+   doesn't briefly flash sensitive UI -- elements start hidden by CSS
+   and only become visible once we know the user is admin. */
+body:not(.tier-admin) [data-admin-only] { display: none !important; }
 
 .zone-meta {
     font-size: 0.8rem;

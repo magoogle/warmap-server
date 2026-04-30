@@ -701,6 +701,21 @@ def get_saturated(request: Request,
     return FileResponse(p, media_type='application/json')
 
 
+@app.get('/whoami')
+@_LIMITER.limit('120/minute')
+def whoami(request: Request,
+           x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    """Reports the caller's identity + tier so the viewer can gate UI
+    (e.g. only show the Admin button to admin keys, only show the
+    Uploaders tab to admin/uploader keys, etc.).
+
+    Returns 401 if no/bad key, otherwise:
+        { name: <key-name-or-'admin'>, tier: 'admin'|'uploader'|'reader' }
+    """
+    rec = _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    return {'name': rec.name, 'tier': rec.tier}
+
+
 @app.get('/coverage')
 @_LIMITER.limit('120/minute')
 def get_coverage(request: Request,

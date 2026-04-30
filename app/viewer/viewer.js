@@ -91,6 +91,11 @@ const S = {
     zoneCache:     {},
     loadingKey:    null,        // zone we're currently fetching, for stale-response detection
     adminKey:      localStorage.getItem('warmap_admin_key') || '',
+    // Tier of the currently-authenticated key.  null until /whoami
+    // resolves; 'admin' | 'uploader' | 'reader' afterward.  Used by
+    // applyTierGating() to hide admin-only UI from non-admin users.
+    tier:          null,
+    userName:      '',
     // Orientation: world-axis -> canvas-axis transform.  D4's coord system
     // doesn't map cleanly to "north up", so we let the user dial it in.
     // rot:   90deg increments clockwise (0|1|2|3)
@@ -361,26 +366,47 @@ function hideSigninOverlay() {
 async function attemptSignin(key) {
     const trimmed = (key || '').trim();
     if (!trimmed) { showSigninOverlay('paste a key first'); return false; }
+    let tierInfo = null;
     try {
-        // Hit /zones (gated) to validate; cheap and uses the same code
-        // path the rest of the viewer takes for read endpoints.
-        const r = await fetch('/zones', {
+        // Hit /whoami (gated) which both validates the key AND tells us
+        // the tier, so we can gate UI in one round-trip.
+        const r = await fetch('/whoami', {
             cache: 'no-store',
             headers: { 'X-WarMap-Key': trimmed },
         });
         if (r.status === 401) { showSigninOverlay('rejected'); return false; }
         if (!r.ok)            { showSigninOverlay(`HTTP ${r.status}`); return false; }
+        tierInfo = await r.json();
     } catch (e) {
         showSigninOverlay('network error');
         return false;
     }
     S.adminKey = trimmed;
+    S.tier     = tierInfo?.tier || 'reader';
+    S.userName = tierInfo?.name || '';
     localStorage.setItem('warmap_admin_key', trimmed);
+    applyTierGating();
     hideSigninOverlay();
     refreshStatus();
     refreshZoneList();
-    refreshUploaders();
+    if (S.tier === 'admin') refreshUploaders();
     return true;
+}
+
+// ---- Tier gating ---------------------------------------------------------
+// Sets a CSS class on <body> based on the user's tier; the stylesheet
+// does the actual show/hide via [data-admin-only] selectors.  Reader-
+// and uploader-tier keys never see the Uploaders tab or Admin button;
+// they get zone download access instead (handled separately below).
+function applyTierGating() {
+    const body = document.body;
+    if (!body) return;
+    body.classList.remove('tier-admin', 'tier-uploader', 'tier-reader');
+    if (S.tier === 'admin')         body.classList.add('tier-admin');
+    else if (S.tier === 'uploader') body.classList.add('tier-uploader');
+    else if (S.tier === 'reader')   body.classList.add('tier-reader');
+    // The download button shows for everyone with a valid key, but only
+    // when a zone is selected; loadZone() flips its hidden state.
 }
 document.getElementById('signin-btn')?.addEventListener('click', () => {
     const inp = document.getElementById('signin-input');
@@ -634,6 +660,10 @@ async function loadZone(key, resetView) {
     });
     D.empty.hidden = true;
     D.zoneView.hidden = false;
+    // Reveal the download button now that a specific zone is loaded
+    // (it's hidden in the empty-state to keep the chrome clean).
+    const dl = document.getElementById('zone-download');
+    if (dl) dl.hidden = false;
 
     // Cache hit: paint instantly, skip the network entirely.
     const cached = S.zoneCache[key];
@@ -1603,6 +1633,41 @@ function showFatalBanner(msg) {
 window.addEventListener('error',  (e) => showFatalBanner('JS error: ' + (e.message || 'unknown')));
 window.addEventListener('unhandledrejection', (e) => showFatalBanner('promise rejection: ' + (e.reason?.message || e.reason || 'unknown')));
 
+// ---- Zone JSON download --------------------------------------------------
+// Fetches the merged zone JSON via the gated /zones/{key} endpoint and
+// triggers a browser download.  Available to every authenticated user
+// (admin, uploader, reader) -- the whole point of the reader tier is
+// that a friend can run this and walk away with the catalog.
+document.getElementById('zone-download')?.addEventListener('click', async () => {
+    if (!S.currentKey) return;
+    const btn = document.getElementById('zone-download');
+    const originalLabel = btn?.textContent;
+    if (btn) { btn.disabled = true; btn.textContent = 'Downloading…'; }
+    try {
+        const r = await fetch('/zones/' + encodeURIComponent(S.currentKey), {
+            cache:   'no-store',
+            headers: authHeaders(),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        // Build a blob URL and click an invisible <a download> -- standard
+        // browser-side download trick.  Server already sends the right
+        // Content-Type; we just want it saved to disk.
+        const blob = await r.blob();
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = S.currentKey + '.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        alert('Download failed: ' + (e?.message || e));
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = originalLabel || 'Download'; }
+    }
+});
+
 (async function init() {
     try {
         // Sign-in gate: if no key in localStorage, every gated endpoint
@@ -1611,10 +1676,35 @@ window.addEventListener('unhandledrejection', (e) => showFatalBanner('promise re
         if (!S.adminKey) {
             showSigninOverlay();
         } else {
+            // Validate the saved key + grab the tier so we can gate UI
+            // before any data renders.  /whoami is cheap (just an auth
+            // check + tier lookup); on failure we still let init finish
+            // so pollLoop is up and the user can sign in again via the
+            // overlay without a page reload.
+            let whoamiOk = false;
             try {
+                const r = await fetch('/whoami', {
+                    cache: 'no-store',
+                    headers: { 'X-WarMap-Key': S.adminKey },
+                });
+                if (r.status === 401) {
+                    showSigninOverlay('saved key was rejected');
+                } else if (!r.ok) {
+                    showFatalBanner('whoami HTTP ' + r.status);
+                } else {
+                    const w = await r.json();
+                    S.tier     = w.tier || 'reader';
+                    S.userName = w.name || '';
+                    applyTierGating();
+                    whoamiOk = true;
+                }
+            } catch (e) {
+                showFatalBanner('whoami failed: ' + (e?.message || e));
+            }
+            if (whoamiOk) try {
                 await refreshStatus();
                 await refreshZoneList();
-                await refreshUploaders();
+                if (S.tier === 'admin') await refreshUploaders();
             } catch (e) {
                 // 401 -> attemptSignin path already showed the overlay
                 // via refreshStatus's catch.  For any other error,
