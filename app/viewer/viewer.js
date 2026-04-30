@@ -97,6 +97,14 @@ const S = {
     // flipX: mirror cell X axis
     // flipY: mirror cell Y axis
     orient: JSON.parse(localStorage.getItem('warmap_orient') || '{}') || {},
+    // Layer toggles.  Each value is a boolean visible-flag.  Persists
+    // across sessions in localStorage; merged with defaults on boot so
+    // newly-added categories show up enabled by default for existing users.
+    layers: (function () {
+        let saved = {};
+        try { saved = JSON.parse(localStorage.getItem('warmap_layers') || '{}') || {}; } catch (e) {}
+        return Object.assign(defaultLayerState(), saved);
+    })(),
 };
 // Defaults that match the D4 top-down view: 180deg rotation puts the
 // player's "south" downward on the canvas.  Users can re-tune via the
@@ -179,6 +187,86 @@ const ACTOR_STYLE = {
     // when investigating "what's that thing the bot ignored".
     interactable:            { c: '#666666', sym: '?',  label: 'Other' },
 };
+// ---------------------------------------------------------------------------
+// Layer system -- group actor `kind`s into operator-friendly categories so
+// the sidebar's Layers tab can offer a small set of toggles instead of one
+// per kind.  Each kind appears in exactly one category; the renderer skips
+// any actor whose category is hidden.  Walkable grid + uploader tracks +
+// path overlay get their own pseudo-categories.
+// ---------------------------------------------------------------------------
+const KIND_CATEGORY = {
+    // Loot / pickups
+    chest_helltide_random:   'loot',
+    chest_helltide_silent:   'loot',
+    chest_helltide_targeted: 'loot',
+    chest:                   'loot',
+    ore:                     'loot',
+    herb:                    'loot',
+    stash:                   'loot',
+    // Threats (non-interactable hostile actors)
+    boss:                    'threats',
+    elite:                   'threats',
+    champion:                'threats',
+    // Travel (portals, exits, dungeons, waypoints)
+    portal:                  'travel',
+    portal_town:             'travel',
+    portal_helltide:         'travel',
+    dungeon_entrance:        'travel',
+    pit_exit:                'travel',
+    pit_floor_portal:        'travel',
+    undercity_exit:          'travel',
+    traversal:               'travel',
+    waypoint:                'travel',
+    horde_gate:              'travel',
+    // Activity objectives + interactives
+    objective:               'objectives',
+    enticement:              'objectives',
+    pyre:                    'objectives',
+    shrine:                  'objectives',
+    glyph_gizmo:             'objectives',
+    pylon:                   'objectives',
+    aether_structure:        'objectives',
+    pit_obelisk:             'objectives',
+    undercity_obelisk:       'objectives',
+    well:                    'objectives',
+    // NPCs / vendors
+    npc:                     'npcs',
+    npc_vendor:              'npcs',
+    warplans_vendor:         'npcs',
+    tyrael:                  'npcs',
+    bounty_npc:              'npcs',
+    mercenary:               'npcs',
+    // Catch-all
+    gizmo:                   'other',
+    interactable:            'other',
+};
+
+// Display metadata for the Layers panel.  Color is the canonical actor color
+// for the most representative kind in the category; sub is a count summary
+// updated live by the renderer.
+const LAYER_CATEGORIES = [
+    { id: 'loot',       label: 'Loot',         color: '#ffcc00', desc: 'chests, ore, herbs, stash' },
+    { id: 'threats',    label: 'Threats',      color: '#ff0033', desc: 'boss / elite / champion' },
+    { id: 'travel',     label: 'Travel',       color: '#cc88ff', desc: 'portals, exits, waypoints' },
+    { id: 'objectives', label: 'Objectives',   color: '#88ffaa', desc: 'shrines, pyres, glyphs, pylons' },
+    { id: 'npcs',       label: 'NPCs',         color: '#dddd66', desc: 'vendors, mercenary, bounty' },
+    { id: 'other',      label: 'Other',        color: '#888888', desc: 'gizmos, generic interactables' },
+];
+
+const PSEUDO_LAYERS = [
+    { id: 'walkable_grid',   label: 'Walkable grid',   color: '#3fb950', desc: 'walkable + blocked cells' },
+    { id: 'uploader_tracks', label: 'Uploader tracks', color: '#3fff8b', desc: 'live session paths' },
+    { id: 'path_overlay',    label: 'Path simulator',  color: '#58a6ff', desc: 'A->B path + endpoints' },
+];
+
+// Default: everything visible.
+function defaultLayerState() {
+    const s = {};
+    for (const c of LAYER_CATEGORIES) s['actors_' + c.id] = true;
+    for (const p of PSEUDO_LAYERS)    s[p.id]            = true;
+    return s;
+}
+
 const KIND_OVERRIDES = {
     pit_obelisk:'Pit Obelisk', undercity_obelisk:'Undercity Obelisk',
     warplans_vendor:'War Plans Vendor', tyrael:'Tyrael', horde_gate:'Horde Gate',
@@ -625,18 +713,21 @@ function render() {
     drawState = { bbox, rawBbox, scale, offX, offY };
 
     const cellSize = Math.max(1, scale);
-    for (const c of cells) {
-        const t = applyOrient(c[0], c[1], rawBbox);
-        const walk = c[2], conf = c[3];
-        const x = offX + t.x*scale;
-        const y = (h - offY) - t.y*scale - cellSize;
-        ctx.fillStyle = walk
-            ? `rgba(63, 185, 80, ${0.35 + 0.65*conf})`
-            : `rgba(207, 52, 52, ${0.35 + 0.65*conf})`;
-        ctx.fillRect(x, y, cellSize, cellSize);
+    if (S.layers?.walkable_grid !== false) {
+        for (const c of cells) {
+            const t = applyOrient(c[0], c[1], rawBbox);
+            const walk = c[2], conf = c[3];
+            const x = offX + t.x*scale;
+            const y = (h - offY) - t.y*scale - cellSize;
+            ctx.fillStyle = walk
+                ? `rgba(63, 185, 80, ${0.35 + 0.65*conf})`
+                : `rgba(207, 52, 52, ${0.35 + 0.65*conf})`;
+            ctx.fillRect(x, y, cellSize, cellSize);
+        }
     }
 
-    // Actors
+    // Actors -- filter by floor + active layer toggles
+    const layers = S.layers || {};
     const actors = (S.currentData.actors || []).filter(a => a.floor == null || String(a.floor) === S.currentFloor);
     const cellRes = S.cellRes;
     const showLabels = scale >= 5;
@@ -644,6 +735,11 @@ function render() {
     for (const a of actors) {
         if (typeof a.x !== 'number') continue;
         if (a.x === 0 && a.y === 0) continue;
+        // Layer gate: skip the actor if its category is hidden.  Unknown
+        // kinds fall into 'other' so they can be hidden via that toggle
+        // without needing to land in KIND_CATEGORY explicitly.
+        const cat = KIND_CATEGORY[a.kind] || 'other';
+        if (layers['actors_' + cat] === false) continue;
         const t = applyOrient(a.x / cellRes, a.y / cellRes, rawBbox);
         const x = offX + t.x*scale, y = (h - offY) - t.y*scale;
         const style = ACTOR_STYLE[a.kind] || { c:'#999', sym:'?' };
@@ -673,7 +769,7 @@ function render() {
     drawState.hits = hits;
 
     // Uploader live tracks (for the active zone)
-    if (S.activeUploader && S.uploaderTracks) {
+    if (S.layers?.uploader_tracks !== false && S.activeUploader && S.uploaderTracks) {
         for (const [name, t] of Object.entries(S.uploaderTracks)) {
             if (t.zone !== S.currentKey) continue;
             const samples = t.samples || [];
@@ -700,6 +796,7 @@ function render() {
     }
 
     // Path simulator overlay
+    if (S.layers?.path_overlay !== false) {
     if (S.pathA) drawWorldDot(S.pathA, '#58a6ff', 'A');
     if (S.pathB) drawWorldDot(S.pathB, '#58a6ff', 'B');
     if (S.pathPath && S.pathPath.length >= 2) {
@@ -713,6 +810,7 @@ function render() {
         }
         ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 2; ctx.stroke();
     }
+    } // end path_overlay layer gate
 }
 
 function drawWorldDot(p, color, label) {
@@ -908,7 +1006,74 @@ document.querySelectorAll('.tab').forEach(tab => {
             p.hidden = !match;
             p.classList.toggle('active', match);
         });
+        // Lazy-render the Layers panel on first activation; subsequent
+        // clicks just re-show the cached DOM.
+        if (target === 'layers') renderLayerPanel();
     });
+});
+
+// ---- Layer panel ---------------------------------------------------------
+//
+// Categories (loot/threats/travel/...) and the three pseudo-layers
+// (walkable_grid, uploader_tracks, path_overlay) each get a checkbox row.
+// Toggling persists to localStorage and re-renders the canvas.
+function persistLayers() {
+    try { localStorage.setItem('warmap_layers', JSON.stringify(S.layers)); } catch (e) {}
+}
+function setLayer(id, on) {
+    S.layers[id] = !!on;
+    persistLayers();
+    render();
+    // Visually update the row's "disabled" styling without a full re-render.
+    const row = document.querySelector(`[data-layer="${id}"]`);
+    if (row) row.classList.toggle('disabled', !on);
+}
+function renderLayerPanel() {
+    const host = document.getElementById('layer-panel');
+    if (!host) return;
+    const sectionRow = (id, label, color, desc) => {
+        const on = S.layers[id] !== false;
+        return `
+            <label class="layer-row${on ? '' : ' disabled'}" data-layer="${id}">
+                <input type="checkbox" data-layer-input="${id}" ${on ? 'checked' : ''}>
+                <span class="swatch-dot" style="background:${color}"></span>
+                <span class="lbl">${esc(label)}<span class="sub">${esc(desc)}</span></span>
+            </label>`;
+    };
+    let html = '<div class="layer-section"><h3>Actors</h3>';
+    for (const c of LAYER_CATEGORIES) {
+        html += sectionRow('actors_' + c.id, c.label, c.color, c.desc);
+    }
+    html += '</div><div class="layer-section"><h3>Map overlays</h3>';
+    for (const p of PSEUDO_LAYERS) {
+        html += sectionRow(p.id, p.label, p.color, p.desc);
+    }
+    html += '</div>';
+    host.innerHTML = html;
+    host.querySelectorAll('input[data-layer-input]').forEach(inp => {
+        inp.addEventListener('change', () => {
+            setLayer(inp.dataset.layerInput, inp.checked);
+        });
+    });
+}
+// Quick actions
+document.getElementById('layers-show-all')?.addEventListener('click', () => {
+    for (const k of Object.keys(S.layers)) S.layers[k] = true;
+    persistLayers();
+    renderLayerPanel();
+    render();
+});
+document.getElementById('layers-hide-all')?.addEventListener('click', () => {
+    for (const k of Object.keys(S.layers)) S.layers[k] = false;
+    persistLayers();
+    renderLayerPanel();
+    render();
+});
+document.getElementById('layers-reset')?.addEventListener('click', () => {
+    S.layers = defaultLayerState();
+    persistLayers();
+    renderLayerPanel();
+    render();
 });
 
 // ---- Path simulator ------------------------------------------------------

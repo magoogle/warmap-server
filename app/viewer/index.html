@@ -23,6 +23,7 @@
         <aside id="sidebar">
             <div class="tabs">
                 <button class="tab active" data-tab="zones">Zones</button>
+                <button class="tab"        data-tab="layers">Layers</button>
                 <button class="tab"        data-tab="uploaders">Uploaders</button>
                 <button class="tab"        data-tab="path">Path</button>
             </div>
@@ -30,6 +31,16 @@
             <div class="tab-pane active" data-tab="zones">
                 <h2>Zones <span id="zone-count" class="muted"></span></h2>
                 <div id="zone-list" class="zone-list-container"></div>
+            </div>
+
+            <div class="tab-pane" data-tab="layers" hidden>
+                <h2>Layers</h2>
+                <div class="layer-quickactions">
+                    <button id="layers-show-all" type="button">Show all</button>
+                    <button id="layers-hide-all" type="button">Hide all</button>
+                    <button id="layers-reset"    type="button">Reset</button>
+                </div>
+                <div id="layer-panel"></div>
             </div>
 
             <div class="tab-pane" data-tab="uploaders" hidden>

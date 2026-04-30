@@ -1,37 +1,123 @@
+/* ---------------------------------------------------------------------
+   Theme variables -- single source of truth for the dark palette.
+   Tweak these to retheme; everything below references them.
+--------------------------------------------------------------------- */
+:root {
+    /* Surfaces (back to front) */
+    --bg-deep:        #07090d;
+    --bg-base:        #0c0f15;
+    --bg-elev-1:      #11151c;
+    --bg-elev-2:      #161b24;
+    --bg-elev-3:      #1d2330;
+
+    /* Borders + dividers */
+    --border-subtle:  #1f2530;
+    --border:         #262d3a;
+    --border-strong:  #353d4d;
+
+    /* Text */
+    --text:           #e6ebf2;
+    --text-secondary: #a3adbe;
+    --text-muted:     #6b7388;
+
+    /* Accent (violet primary, used for active tabs, buttons, foci) */
+    --accent:         #8b6dff;
+    --accent-hover:   #9d83ff;
+    --accent-soft:    rgba(139, 109, 255, 0.14);
+    --accent-edge:    rgba(139, 109, 255, 0.4);
+
+    /* Status colors (also used in the canvas renderer indirectly) */
+    --ok:             #3fcf72;
+    --warn:           #f0c14b;
+    --bad:            #ff5b6c;
+    --info:           #5cc7ff;
+
+    /* Map tile colors (mirror what viewer.js uses for cells) */
+    --walkable:       #3fb950;
+    --blocked:        #cf3434;
+    --path:           #58a6ff;
+
+    /* Spacing scale */
+    --gap-xs:  0.25rem;
+    --gap-sm:  0.5rem;
+    --gap-md:  0.75rem;
+    --gap-lg:  1rem;
+
+    /* Shadows */
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.45);
+    --shadow-lg: 0 12px 32px rgba(0,0,0,0.55);
+
+    /* Radii */
+    --r-sm: 4px;
+    --r-md: 6px;
+    --r-lg: 10px;
+}
+
 * { box-sizing: border-box; }
 
 body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #0e1116;
-    color: #d6dde6;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background:
+        radial-gradient(ellipse 80% 60% at 50% -10%, rgba(139, 109, 255, 0.10), transparent 60%),
+        var(--bg-base);
+    color: var(--text);
     height: 100vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;   /* keep the orient/legend bar on screen even when
                            the canvas would otherwise push them below */
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
 }
+
+/* Custom scrollbars to match the dark theme */
+::-webkit-scrollbar       { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: var(--bg-base); }
+::-webkit-scrollbar-thumb {
+    background: var(--bg-elev-3);
+    border-radius: 5px;
+    border: 2px solid var(--bg-base);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
 
 header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.6rem 1rem;
-    background: #161b22;
-    border-bottom: 1px solid #21262d;
+    padding: 0.6rem 1.2rem;
+    background: linear-gradient(180deg, var(--bg-elev-2) 0%, var(--bg-elev-1) 100%);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+    position: relative;
+    z-index: 5;
 }
 
 header h1 {
     margin: 0;
-    font-size: 1.1rem;
+    font-size: 1.05rem;
     font-weight: 600;
+    letter-spacing: -0.01em;
+    background: linear-gradient(135deg, var(--text) 0%, var(--accent) 80%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
 }
 
 .version {
-    font-size: 0.75rem;
-    color: #8b949e;
-    font-weight: 400;
-    margin-left: 0.4rem;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-left: 0.5rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    background: var(--accent-soft);
+    padding: 2px 7px;
+    border-radius: var(--r-sm);
+    -webkit-background-clip: padding-box;
+    background-clip: padding-box;
+    color: var(--accent);
 }
 
 .header-meta {
@@ -41,7 +127,7 @@ header h1 {
     font-size: 0.85rem;
 }
 
-.muted { color: #8b949e; }
+.muted, #status-text.muted { color: var(--text-muted); }
 
 .auto-toggle {
     display: inline-flex;
@@ -57,19 +143,20 @@ main {
 }
 
 #sidebar {
-    width: 260px;
-    background: #11151c;
-    border-right: 1px solid #21262d;
+    width: 280px;
+    background: var(--bg-elev-1);
+    border-right: 1px solid var(--border);
     overflow-y: auto;
-    padding: 0.6rem 0.4rem;
+    padding: 0.7rem 0.5rem;
 }
 
 #sidebar h2 {
     margin: 0.2rem 0.6rem 0.6rem;
-    font-size: 0.85rem;
+    font-size: 0.7rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #8b949e;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    font-weight: 600;
 }
 
 .zone-list {
@@ -86,8 +173,11 @@ main {
     transition: background-color 0.1s;
 }
 
-.zone-list li:hover { background: #1c222b; }
-.zone-list li.active { background: #2d3441; }
+.zone-list li:hover  { background: var(--bg-elev-2); }
+.zone-list li.active {
+    background: var(--accent-soft);
+    box-shadow: inset 2px 0 0 0 var(--accent);
+}
 
 .zone-list .zone-name {
     font-weight: 500;
@@ -156,10 +246,11 @@ main {
     flex: 1 1 0;
     min-height: 0;          /* without this, canvas pushes siblings off-screen */
     position: relative;
-    background: #06090d;
-    border: 1px solid #21262d;
-    border-radius: 4px;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
     overflow: hidden;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.3), var(--shadow-sm);
 }
 
 #zone-canvas {
@@ -257,26 +348,32 @@ main {
 /* ---- Sidebar tabs ---- */
 .tabs {
     display: flex;
-    gap: 0.2rem;
-    margin: 0 0.4rem 0.5rem;
-    border-bottom: 1px solid #21262d;
+    gap: 0.15rem;
+    margin: 0 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    padding: 0 0.2rem;
 }
 .tab {
     flex: 1;
     background: transparent;
     border: none;
-    color: #8b949e;
-    padding: 0.35rem 0;
+    color: var(--text-muted);
+    padding: 0.45rem 0;
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: 0.72rem;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
     border-bottom: 2px solid transparent;
+    transition: color 0.12s, border-color 0.12s;
 }
-.tab:hover  { color: #d6dde6; }
-.tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+.tab:hover  { color: var(--text); }
+.tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
 .tab-pane[hidden] { display: none; }
-.hint { font-size: 0.72rem; padding: 0.4rem 0.6rem; }
+.hint { font-size: 0.72rem; padding: 0.4rem 0.6rem; color: var(--text-muted); }
 
 .path-controls {
     display: flex; gap: 0.3rem; padding: 0.4rem 0.6rem 0.2rem;
@@ -538,8 +635,147 @@ main {
 
 /* ---- Hover tooltip enhancements ---- */
 .hover-tooltip .h-skin {
-    color: #58a6ff;
+    color: var(--info);
     font-size: 0.7rem;
     font-family: Consolas, monospace;
     margin-top: 0.1rem;
+}
+
+/* ---------------------------------------------------------------------
+   Layer toggle panel -- the sidebar's "Layers" tab.
+   Lets the operator hide/show actor categories, walkable grid,
+   uploader tracks, and path overlay.  State persists in localStorage.
+--------------------------------------------------------------------- */
+.layer-section {
+    margin: 0.4rem 0.4rem 0.6rem;
+}
+.layer-section h3 {
+    margin: 0.5rem 0.3rem 0.3rem;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+.layer-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.1s;
+    font-size: 0.82rem;
+}
+.layer-row:hover { background: var(--bg-elev-2); }
+.layer-row input[type="checkbox"] {
+    accent-color: var(--accent);
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+    margin: 0;
+}
+.layer-row .swatch-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.08);
+}
+.layer-row .lbl {
+    flex: 1 1 auto;
+    color: var(--text);
+}
+.layer-row .lbl .sub {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    margin-left: 0.35rem;
+}
+.layer-row.disabled .lbl {
+    color: var(--text-muted);
+    text-decoration: line-through;
+}
+.layer-quickactions {
+    display: flex;
+    gap: 0.3rem;
+    padding: 0 0.5rem 0.4rem;
+}
+.layer-quickactions button {
+    flex: 1;
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    color: var(--text-secondary);
+    padding: 0.3rem;
+    cursor: pointer;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.layer-quickactions button:hover {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: var(--accent-edge);
+}
+
+/* ---------------------------------------------------------------------
+   Polish for buttons + inputs across the app.  Existing class names are
+   unchanged; just modernizing the look.
+--------------------------------------------------------------------- */
+button {
+    font-family: inherit;
+}
+.hdr-btn {
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: var(--r-sm);
+    padding: 0.3rem 0.7rem;
+    cursor: pointer;
+    font-size: 0.78rem;
+    transition: all 0.1s;
+}
+.hdr-btn:hover {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: var(--accent-edge);
+}
+
+/* Modal polish */
+.modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(3px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+}
+.modal[hidden] { display: none; }
+.modal-card {
+    background: var(--bg-elev-1);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-lg);
+    width: min(720px, calc(100vw - 2rem));
+    max-height: calc(100vh - 2rem);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.7rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elev-2);
+}
+.modal-header h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+.modal-body {
+    padding: 1rem;
+    overflow-y: auto;
 }
