@@ -100,11 +100,10 @@ const S = {
     // Layer toggles.  Each value is a boolean visible-flag.  Persists
     // across sessions in localStorage; merged with defaults on boot so
     // newly-added categories show up enabled by default for existing users.
-    layers: (function () {
-        let saved = {};
-        try { saved = JSON.parse(localStorage.getItem('warmap_layers') || '{}') || {}; } catch (e) {}
-        return Object.assign(defaultLayerState(), saved);
-    })(),
+    // Initialized below (after LAYER_CATEGORIES + defaultLayerState are
+    // declared -- const/let don't hoist, so we can't call defaultLayerState
+    // from inside this object literal).
+    layers: {},
 };
 // Defaults that match the D4 top-down view: 180deg rotation puts the
 // player's "south" downward on the canvas.  Users can re-tune via the
@@ -266,6 +265,16 @@ function defaultLayerState() {
     for (const p of PSEUDO_LAYERS)    s[p.id]            = true;
     return s;
 }
+
+// Now that LAYER_CATEGORIES + PSEUDO_LAYERS + defaultLayerState exist,
+// populate S.layers.  Has to live here (not in the S object literal
+// above) because const/let don't hoist -- referencing LAYER_CATEGORIES
+// before its declaration trips ReferenceError.
+(function _initLayers() {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('warmap_layers') || '{}') || {}; } catch (e) {}
+    S.layers = Object.assign(defaultLayerState(), saved);
+})();
 
 const KIND_OVERRIDES = {
     pit_obelisk:'Pit Obelisk', undercity_obelisk:'Undercity Obelisk',
