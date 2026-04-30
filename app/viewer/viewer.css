@@ -293,6 +293,37 @@ main {
 .path-result .row { display: flex; justify-content: space-between; padding: 0.1rem 0; }
 .path-result .k { color: #8b949e; }
 
+.zone-list-container { padding: 0 0.4rem; }
+
+.zone-cat {
+    margin-bottom: 0.3rem;
+}
+.zone-cat > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 0.3rem 0.4rem;
+    color: #d6dde6;
+    font-size: 0.8rem;
+    font-weight: 600;
+    border-radius: 3px;
+    user-select: none;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.zone-cat > summary::-webkit-details-marker { display: none; }
+.zone-cat > summary::before {
+    content: '▶';
+    display: inline-block;
+    width: 0.9em;
+    margin-right: 0.2em;
+    color: #8b949e;
+    transition: transform 0.1s;
+    font-size: 0.7rem;
+}
+.zone-cat[open] > summary::before { transform: rotate(90deg); }
+.zone-cat > summary:hover { background: #1c222b; }
+.zone-cat-list { padding-left: 0.5rem; margin: 0.1rem 0 0.4rem; }
+
 .zone-list li.uploader { padding-bottom: 0.5rem; }
 .zone-list li .badge {
     display: inline-block; padding: 0 0.35rem;

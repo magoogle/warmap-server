@@ -231,17 +231,81 @@ async function refreshZoneList() {
     } catch {}
 }
 
+// Mirror of the recorder's activity classifier so we can bucket zones in
+// the sidebar without round-tripping to the server for activity_kind.
+const TOWN_ZONES = new Set([
+    'Skov_Temis','Scos_Cerrigar','Kehj_Caldeum','Hawe_Backwater',
+    'Hawe_Tarsarak','Hawe_Zarbinzet','Naha_KurastDocks','Frac_Menestad',
+    'Step_Jirandai','Kehj_IronWolves_Kehjan','Frac_Tundra_S','Scos_Coast',
+]);
+function categoryFor(key) {
+    if (TOWN_ZONES.has(key))                return { id: 'towns',     label: 'Towns'              };
+    if (key.startsWith('PIT_'))             return { id: 'pits',      label: 'Pits'               };
+    if (key.startsWith('DGN_'))             return { id: 'nmds',      label: 'Nightmare Dungeons' };
+    if (key.startsWith('X1_Undercity_'))    return { id: 'undercity', label: 'Undercity'          };
+    if (key.startsWith('S05_BSK_'))         return { id: 'hordes',    label: 'Hordes'             };
+    if (key === 'coverage' || key.startsWith('_')) {
+        return { id: 'system', label: 'System' };
+    }
+    return { id: 'overworld', label: 'Overworld' };
+}
+const CATEGORY_ORDER = ['towns', 'overworld', 'pits', 'nmds', 'undercity', 'hordes', 'system'];
+
 function renderZoneList() {
     D.zoneList.innerHTML = '';
+
+    // Bucket
+    const buckets = {};
     for (const key of S.zoneList) {
-        const li = document.createElement('li');
-        li.dataset.key = key;
-        if (key === S.currentKey) li.classList.add('active');
-        const n = document.createElement('div');
-        n.className = 'zone-name'; n.textContent = key;
-        li.appendChild(n);
-        li.addEventListener('click', () => loadZone(key, true));
-        D.zoneList.appendChild(li);
+        const cat = categoryFor(key);
+        (buckets[cat.id] ??= { label: cat.label, zones: [] }).zones.push(key);
+    }
+    // Stable, alphabetical within bucket
+    for (const id of Object.keys(buckets)) buckets[id].zones.sort();
+
+    // Render in fixed order; categories with zero entries are skipped
+    for (const id of CATEGORY_ORDER) {
+        const b = buckets[id];
+        if (!b || b.zones.length === 0) continue;
+
+        const det = document.createElement('details');
+        det.className = 'zone-cat';
+        det.dataset.cat = id;
+        // Persist open/closed state across refreshes via localStorage.
+        const stored = localStorage.getItem('zone_cat_' + id);
+        const containsCurrent = b.zones.includes(S.currentKey);
+        det.open = (stored == null) ? (containsCurrent || id === 'towns') : (stored === '1');
+        det.addEventListener('toggle', () => {
+            localStorage.setItem('zone_cat_' + id, det.open ? '1' : '0');
+        });
+
+        const sum = document.createElement('summary');
+        sum.innerHTML = `${b.label} <span class="muted">${b.zones.length}</span>`;
+        det.appendChild(sum);
+
+        const ul = document.createElement('ul');
+        ul.className = 'zone-list zone-cat-list';
+        for (const key of b.zones) {
+            const li = document.createElement('li');
+            li.dataset.key = key;
+            if (key === S.currentKey) li.classList.add('active');
+            const n = document.createElement('div');
+            // Strip the category prefix from display so "Skov_Temis" stays
+            // readable but "PIT_Cave_Coast" appears as "Cave_Coast" inside
+            // the Pits category.  Towns + overworld keep full name.
+            n.className = 'zone-name';
+            n.textContent = id === 'pits' ? key.replace(/^PIT_/, '')
+                          : id === 'nmds' ? key.replace(/^DGN_/, '')
+                          : id === 'undercity' ? key.replace(/^X1_Undercity_/, '')
+                          : id === 'hordes' ? key.replace(/^S05_BSK_/, '')
+                          : key;
+            n.title = key;     // full key always visible on hover
+            li.appendChild(n);
+            li.addEventListener('click', () => loadZone(key, true));
+            ul.appendChild(li);
+        }
+        det.appendChild(ul);
+        D.zoneList.appendChild(det);
     }
 }
 
