@@ -131,6 +131,7 @@ const ACTOR_STYLE = {
     portal_helltide:         { c: '#ff5544', sym: 'H',  label: 'HellPortal' },
     dungeon_entrance:        { c: '#ff66cc', sym: 'D',  label: 'Dungeon' },
     pit_exit:                { c: '#ffd700', sym: 'X',  label: 'Pit Exit' },
+    pit_floor_portal:        { c: '#ff8c00', sym: 'F',  label: 'Pit Floor' },
     traversal:               { c: '#88ddff', sym: 't',  label: 'Trav' },
     waypoint:                { c: '#88ff88', sym: 'W',  label: 'Waypoint' },
     stash:                   { c: '#ddddff', sym: 'S',  label: 'Stash' },
@@ -159,6 +160,7 @@ const KIND_OVERRIDES = {
     waypoint:'Waypoint', pyre:'Pyre', traversal:'Traversal', portal:'Portal',
     portal_town:'Town Portal', portal_helltide:'Helltide Portal',
     dungeon_entrance:'Dungeon Entrance', pit_exit:'Pit Exit',
+    pit_floor_portal:'Pit Floor Portal',
     objective:'Objective', enticement:'Beacon',
 };
 
