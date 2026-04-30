@@ -165,6 +165,14 @@ const ACTOR_STYLE = {
     herb:                    { c: '#66cc66', sym: 'h',  label: 'Herb' },
     npc_vendor:              { c: '#dddd66', sym: 'V',  label: 'Vendor' },
     npc:                     { c: '#aaaaaa', sym: 'n',  label: 'NPC' },
+    // Hostile mobs (non-interactable; useful for "boss room" identification)
+    boss:                    { c: '#ff0033', sym: 'B',  label: 'Boss' },
+    elite:                   { c: '#ff7733', sym: 'e',  label: 'Elite' },
+    champion:                { c: '#ffaa55', sym: 'c',  label: 'Champion' },
+    // Hordes interactables
+    boon:                    { c: '#33ff99', sym: 'b',  label: 'Boon' },
+    bane:                    { c: '#cc3399', sym: 'X',  label: 'Bane' },
+    aether:                  { c: '#99ccff', sym: 'a',  label: 'Aether' },
 };
 const KIND_OVERRIDES = {
     pit_obelisk:'Pit Obelisk', undercity_obelisk:'Undercity Obelisk',
@@ -176,6 +184,8 @@ const KIND_OVERRIDES = {
     pit_floor_portal:'Pit Floor Portal',
     undercity_exit:'Undercity Floor Switch',
     objective:'Objective', enticement:'Beacon',
+    boss:'Boss', elite:'Elite', champion:'Champion',
+    boon:'Hordes Boon', bane:'Hordes Bane', aether:'Aether Pickup',
 };
 
 function actorDisplayName(a) {
