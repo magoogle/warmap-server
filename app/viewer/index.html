@@ -15,13 +15,39 @@
                 <input type="checkbox" id="auto-refresh" checked />
                 Auto-refresh
             </label>
+            <button id="admin-btn" class="hdr-btn" title="Admin: manage keys / quarantine">Admin</button>
         </div>
     </header>
 
     <main>
         <aside id="sidebar">
-            <h2>Zones <span id="zone-count" class="muted"></span></h2>
-            <ul id="zone-list" class="zone-list"></ul>
+            <div class="tabs">
+                <button class="tab active" data-tab="zones">Zones</button>
+                <button class="tab"        data-tab="uploaders">Uploaders</button>
+                <button class="tab"        data-tab="path">Path</button>
+            </div>
+
+            <div class="tab-pane active" data-tab="zones">
+                <h2>Zones <span id="zone-count" class="muted"></span></h2>
+                <ul id="zone-list" class="zone-list"></ul>
+            </div>
+
+            <div class="tab-pane" data-tab="uploaders" hidden>
+                <h2>Uploaders <span id="uploader-count" class="muted"></span></h2>
+                <ul id="uploader-list" class="zone-list"></ul>
+                <div class="hint muted">Click an uploader to highlight their tracks on the active zone. Live (in-progress) sessions update on every refresh.</div>
+            </div>
+
+            <div class="tab-pane" data-tab="path" hidden>
+                <h2>Path Simulator</h2>
+                <div class="path-controls">
+                    <button id="path-pick-a" class="path-btn">Pick A</button>
+                    <button id="path-pick-b" class="path-btn">Pick B</button>
+                    <button id="path-clear"  class="path-btn ghost">Clear</button>
+                </div>
+                <div id="path-status" class="muted">Click "Pick A" then click on the map. Then "Pick B" + click. Path drawn over the merged walkable grid (server-side cells, A* in JS -- approximate; in-game uses the host pathfinder).</div>
+                <div id="path-result" class="path-result"></div>
+            </div>
         </aside>
 
         <section id="content">
@@ -52,11 +78,49 @@
                     <span class="legend-item"><span class="swatch walkable"></span>walkable</span>
                     <span class="legend-item"><span class="swatch blocked"></span>blocked</span>
                     <span class="legend-item"><span class="diamond"></span>actor (click for info)</span>
+                    <span class="legend-item"><span class="swatch path"></span>simulated path</span>
                     <span class="legend-item muted">drag = pan · scroll = zoom · click marker = inspect</span>
                 </div>
             </div>
         </section>
     </main>
+
+    <!-- Admin modal -->
+    <div id="admin-modal" class="modal" hidden>
+        <div class="modal-card">
+            <header class="modal-header">
+                <h2>Admin</h2>
+                <button id="admin-close" class="hdr-btn">x</button>
+            </header>
+            <div class="modal-body">
+                <div id="admin-auth" class="admin-auth">
+                    <p class="muted">Paste the master admin key (the operator's key from <code>/opt/warmap/.env</code>) to manage uploaders.</p>
+                    <input type="password" id="admin-key-input" placeholder="admin key (64 hex chars)" />
+                    <button id="admin-key-save">Save</button>
+                </div>
+                <div id="admin-panel" hidden>
+                    <section class="admin-section">
+                        <h3>Mint a new uploader key</h3>
+                        <div class="mint-row">
+                            <input type="text" id="mint-name" placeholder="friend's name (e.g. davids)" />
+                            <input type="text" id="mint-note" placeholder="note (optional)" />
+                            <button id="mint-go">Mint</button>
+                        </div>
+                        <div id="mint-result" class="mint-result"></div>
+                    </section>
+                    <section class="admin-section">
+                        <h3>Existing uploader keys</h3>
+                        <table class="key-table">
+                            <thead>
+                                <tr><th>Name</th><th>Uploads</th><th>Last seen</th><th>State</th><th></th></tr>
+                            </thead>
+                            <tbody id="key-table-body"></tbody>
+                        </table>
+                    </section>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script src="viewer.js"></script>
 </body>

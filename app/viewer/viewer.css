@@ -214,6 +214,132 @@ main {
 .swatch.walkable { background: #3fb950; }
 .swatch.blocked  { background: #cf3434; }
 .swatch.actor    { background: #ffd33d; border-radius: 50%; }
+.swatch.path     { background: #58a6ff; }
+
+/* ---- Sidebar tabs ---- */
+.tabs {
+    display: flex;
+    gap: 0.2rem;
+    margin: 0 0.4rem 0.5rem;
+    border-bottom: 1px solid #21262d;
+}
+.tab {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: #8b949e;
+    padding: 0.35rem 0;
+    cursor: pointer;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 2px solid transparent;
+}
+.tab:hover  { color: #d6dde6; }
+.tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+.tab-pane[hidden] { display: none; }
+.hint { font-size: 0.72rem; padding: 0.4rem 0.6rem; }
+
+.path-controls {
+    display: flex; gap: 0.3rem; padding: 0.4rem 0.6rem 0.2rem;
+}
+.path-btn {
+    flex: 1; background: #21262d; color: #d6dde6;
+    border: 1px solid #30363d; border-radius: 4px;
+    padding: 0.3rem 0.4rem; font-size: 0.78rem; cursor: pointer;
+}
+.path-btn:hover  { background: #2d3441; }
+.path-btn.armed  { background: #1f6feb; border-color: #58a6ff; color: #fff; }
+.path-btn.ghost  { background: transparent; }
+.path-result { padding: 0.4rem 0.6rem; font-size: 0.78rem; }
+.path-result .row { display: flex; justify-content: space-between; padding: 0.1rem 0; }
+.path-result .k { color: #8b949e; }
+
+.zone-list li.uploader { padding-bottom: 0.5rem; }
+.zone-list li .badge {
+    display: inline-block; padding: 0 0.35rem;
+    border-radius: 8px; font-size: 0.65rem;
+    margin-right: 0.25rem; background: #2d3441;
+}
+.zone-list li .badge.live { background: #238636; color: #fff; }
+
+.hdr-btn {
+    background: #21262d; color: #d6dde6;
+    border: 1px solid #30363d; border-radius: 4px;
+    padding: 0.2rem 0.55rem; font-size: 0.78rem; cursor: pointer;
+}
+.hdr-btn:hover { background: #2d3441; }
+
+/* ---- Modal ---- */
+.modal {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+}
+.modal-card {
+    background: #11151c; border: 1px solid #30363d; border-radius: 8px;
+    width: min(720px, 95vw); max-height: 85vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+}
+.modal-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0.6rem 0.9rem; border-bottom: 1px solid #21262d;
+}
+.modal-header h2 { margin: 0; font-size: 1rem; }
+.modal-body { padding: 0.9rem; overflow-y: auto; }
+.admin-section { margin-bottom: 1.2rem; }
+.admin-section h3 {
+    font-size: 0.85rem; margin: 0 0 0.5rem; color: #8b949e;
+    text-transform: uppercase; letter-spacing: 0.05em;
+}
+.admin-auth input, .mint-row input {
+    background: #21262d; color: #d6dde6;
+    border: 1px solid #30363d; border-radius: 4px;
+    padding: 0.35rem 0.5rem; margin-right: 0.3rem;
+    font-family: Consolas, monospace; font-size: 0.85rem;
+}
+.admin-auth input { width: 100%; margin-bottom: 0.4rem; }
+.admin-auth button, .mint-row button {
+    background: #1f6feb; border: none; color: #fff;
+    padding: 0.35rem 0.8rem; border-radius: 4px; cursor: pointer;
+    font-weight: 600; font-size: 0.85rem;
+}
+.admin-auth button:hover, .mint-row button:hover { background: #388bfd; }
+.mint-row { display: flex; gap: 0.3rem; margin-bottom: 0.5rem; }
+.mint-row #mint-name { flex: 0 0 35%; }
+.mint-row #mint-note { flex: 1; }
+.mint-result {
+    background: #161b22; border: 1px solid #30363d; border-radius: 4px;
+    padding: 0.5rem; font-family: Consolas, monospace;
+    font-size: 0.78rem; word-break: break-all; margin-top: 0.4rem;
+    min-height: 1.2em;
+}
+.mint-result .copy-btn {
+    background: #2d3441; border: 1px solid #30363d; color: #d6dde6;
+    border-radius: 3px; padding: 0.1rem 0.4rem;
+    margin-left: 0.5rem; cursor: pointer; font-size: 0.7rem;
+}
+
+.key-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.key-table th, .key-table td {
+    padding: 0.3rem 0.4rem; text-align: left;
+    border-bottom: 1px solid #21262d;
+}
+.key-table th {
+    color: #8b949e; font-weight: 500; font-size: 0.72rem;
+    text-transform: uppercase; letter-spacing: 0.05em;
+}
+.key-table td { font-family: Consolas, monospace; }
+.key-table button {
+    background: transparent; color: #cf3434;
+    border: 1px solid #30363d; border-radius: 3px;
+    padding: 0.1rem 0.45rem; cursor: pointer;
+    font-size: 0.72rem; margin-right: 0.2rem;
+}
+.key-table button:hover { background: #2d3441; color: #ff7b72; }
+.key-table tr.disabled td { color: #8b949e; opacity: 0.6; }
 
 .diamond {
     width: 10px;
