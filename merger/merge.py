@@ -598,21 +598,108 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
                 if wy > bbox[3]: bbox[3] = wy
         cells_out_by_floor[str(floor)] = rows
 
+    # Mobile-actor collapse.  Bosses + champions are single in-world
+    # entities that move during their fight, so the recorder emits N
+    # `actor` entries with the same skin/sno_id but different rounded
+    # positions -- one per spot the boss happened to be when scanned.
+    # Across multiple sessions this clusters into a starburst of dozens
+    # of "Boss" pins in the boss room.  Visually noisy, semantically
+    # wrong: there's exactly one boss.
+    #
+    # We collapse them here (server-side, applies uniformly to all
+    # consumers) by grouping mobile-kind actors on the same floor with
+    # the same (skin, sno_id) and emitting one centroid entry, weighted
+    # by total_observations (so the centroid biases toward where the
+    # boss spent the most TIME -- usually the room's intended center).
+    # Pass-through unchanged for static kinds (interactables, doors,
+    # shrines, etc.) -- those don't move and benefit from the per-
+    # position dedup.
+    MOBILE_KINDS = {'boss', 'champion'}
+
     actors_out: list[dict] = []
-    for key, a in agg.actors.items():
+    # Cluster bucket: (skin, sno_id, floor) -> list[ActorAgg]
+    mobile_clusters: dict[tuple, list[ActorAgg]] = {}
+    for _key, a in agg.actors.items():
+        if a.kind in MOBILE_KINDS and a.sno_id is not None:
+            mobile_clusters.setdefault((a.skin, a.sno_id, a.floor), []).append(a)
+        else:
+            d = {
+                'skin': a.skin,
+                'kind': a.kind,
+                'x': a.x, 'y': a.y, 'z': a.z,
+                'floor': a.floor,
+                'sessions_seen': len(a.sessions_seen),
+                'total_observations': a.total_observations,
+            }
+            if a.type_id is not None:  d['type_id'] = a.type_id
+            if a.sno_id is not None:   d['sno_id']  = a.sno_id
+            if a.radius is not None:   d['radius']  = a.radius
+            if a.is_boss:              d['is_boss']  = True
+            if a.is_elite:             d['is_elite'] = True
+            actors_out.append(d)
+
+    # Emit one centroid per mobile cluster.  Single-entry clusters
+    # (e.g. an elite that didn't move much, or a boss observed once)
+    # behave identically to a pass-through emission -- the loop is
+    # safe to use uniformly.
+    for (skin, sno_id, floor), entries in mobile_clusters.items():
+        # Observation-weighted centroid.  Falls back to a uniform
+        # average when total weight is 0 (shouldn't happen, but cheap
+        # to handle defensively).
+        total_w = sum(max(1, e.total_observations) for e in entries)
+        wx = sum(e.x * max(1, e.total_observations) for e in entries) / total_w
+        wy = sum(e.y * max(1, e.total_observations) for e in entries) / total_w
+        wz = sum(e.z * max(1, e.total_observations) for e in entries) / total_w
+        # Spread = max distance any sighting was from the centroid.
+        # Useful both as a viewer hint (draw the boss diamond bigger
+        # if it ranges over a wide arena) and as a diagnostic
+        # ("a 30m spread on the same boss SNO -> floor detection
+        # probably mis-grouped two separate rooms").
+        spread = 0.0
+        for e in entries:
+            dx, dy = e.x - wx, e.y - wy
+            d = (dx * dx + dy * dy) ** 0.5
+            if d > spread: spread = d
+        # Union session set + sum observations across the cluster.
+        sessions_seen = set()
+        total_obs = 0
+        is_boss  = False
+        is_elite = False
+        type_id  = None
+        radius   = None
+        for e in entries:
+            sessions_seen |= e.sessions_seen
+            total_obs += e.total_observations
+            if e.is_boss:  is_boss  = True
+            if e.is_elite: is_elite = True
+            if type_id is None and e.type_id is not None: type_id = e.type_id
+            # Keep the largest non-null radius -- conservative for
+            # rendering hit-tests on the viewer side.
+            if e.radius is not None and (radius is None or e.radius > radius):
+                radius = e.radius
+        # Single-entry clusters skip the synthetic spread/centroid
+        # math (it would round to the same coords anyway).
+        ex0 = entries[0]
         d = {
-            'skin': a.skin,
-            'kind': a.kind,
-            'x': a.x, 'y': a.y, 'z': a.z,
-            'floor': a.floor,
-            'sessions_seen': len(a.sessions_seen),
-            'total_observations': a.total_observations,
+            'skin': skin,
+            'kind': ex0.kind,
+            'x': round(wx, 1), 'y': round(wy, 1), 'z': round(wz, 1),
+            'floor': floor,
+            'sessions_seen': len(sessions_seen),
+            'total_observations': total_obs,
         }
-        if a.type_id is not None:  d['type_id'] = a.type_id
-        if a.sno_id is not None:   d['sno_id']  = a.sno_id
-        if a.radius is not None:   d['radius']  = a.radius
-        if a.is_boss:              d['is_boss']  = True
-        if a.is_elite:             d['is_elite'] = True
+        d['sno_id'] = sno_id
+        if type_id is not None: d['type_id'] = type_id
+        if radius  is not None: d['radius']  = radius
+        if is_boss:  d['is_boss']  = True
+        if is_elite: d['is_elite'] = True
+        # Surface the cluster diagnostics for the viewer.  positions =
+        # how many distinct rounded-position sightings collapsed into
+        # this entry; spread_m = farthest sighting from the centroid.
+        # Lets a viewer optionally draw a faint ring at radius=spread.
+        if len(entries) > 1:
+            d['cluster_positions'] = len(entries)
+            d['cluster_spread_m'] = round(spread, 1)
         actors_out.append(d)
 
     saturated, sat_info = is_saturated(agg)

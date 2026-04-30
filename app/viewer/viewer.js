@@ -1204,6 +1204,27 @@ function render() {
         const x = offX + t.x*scale, y = (h - offY) - t.y*scale;
         const style = ACTOR_STYLE[effKind] || { c:'#999', sym:'?' };
         const isSel = (a === S.selectedActor), isHov = (a === S.hoveredActor);
+        // Cluster-spread ring: server-side mobile-actor collapse
+        // condenses N positional sightings of a boss/champion into one
+        // centroid + a `cluster_spread_m` field.  Drawing a faint ring
+        // at world-radius=spread tells the user "this single pin
+        // represents a boss that ranged X meters around this point".
+        // Only drawn when meaningful (>1m) so single-position bosses
+        // don't get a 0-radius ring.
+        if (a.cluster_spread_m && a.cluster_spread_m > 1) {
+            const ringPx = a.cluster_spread_m / cellRes * scale;
+            if (ringPx > 4) {
+                ctx.beginPath();
+                ctx.arc(x, y, ringPx, 0, 2 * Math.PI);
+                ctx.strokeStyle = isSel
+                    ? 'rgba(255, 215, 0, 0.55)'
+                    : 'rgba(248, 81, 73, 0.32)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        }
         if (isSel || isHov) {
             ctx.beginPath(); ctx.arc(x, y, isSel ? 13 : 10, 0, 2*Math.PI);
             ctx.strokeStyle = isSel ? '#ffd700' : '#fff'; ctx.lineWidth = isSel ? 2 : 1.5; ctx.stroke();
@@ -1498,6 +1519,14 @@ function renderActorPanel() {
     row('radius', a.radius);
     row('sessions seen', a.sessions_seen);
     row('observations',  a.total_observations);
+    // Server-side mobile-actor cluster diagnostics.  Only set on
+    // bosses/champions whose multiple sightings collapsed into one
+    // centroid entry.  Lets the user tell at a glance whether they're
+    // looking at a real single point (no rows) or a collapsed pin
+    // (e.g. "12 positions, 6.4m spread" => boss room with the boss
+    // ranging 6m around the centroid).
+    if (a.cluster_positions) row('positions', a.cluster_positions);
+    if (a.cluster_spread_m)  row('spread',    a.cluster_spread_m + ' m');
     if (a.is_boss)  row('flag', 'BOSS');
     if (a.is_elite) row('flag', 'ELITE');
 
