@@ -198,19 +198,19 @@ def _import_merger():
 # which means with 4 workers an attacker hitting at exactly the limit can
 # distribute across workers and effectively get 4x through.  Acceptable
 # for our threat model -- limits exist to deter casual scrapers and runaway
-# friend scripts, not to mitigate DDoS.  The master ADMIN_KEY is exempt
-# (so the operator can hammer their own server without 429s during admin
-# work) via the _is_admin_request helper below.
+# friend scripts, not to mitigate DDoS.
+#
+# Admin requests share the same per-IP buckets as everyone else.  The
+# limits are sized so the operator's own scripts never realistically
+# trip them: 120/min reads, 60/min uploads, 30/min admin endpoints.
+# slowapi's exempt_when callable doesn't get a Request handle, so a
+# clean per-key bypass would require a contextvar shim -- not worth it
+# for a self-hosted-by-friend server with this traffic shape.
 #
 # Limits chosen for typical use:
 #   /upload                    60/min   (multipart, server cost)
 #   /zones, /zones/{key}, etc  120/min  (~2/s sustained, plenty for friend syncs)
 #   /admin/*                    30/min   (rare ops, tight ceiling)
-def _is_admin_request(request: Request) -> bool:
-    """Bypass rate limits when the master ADMIN_KEY is presented."""
-    return ADMIN_KEY and request.headers.get('x-warmap-key') == ADMIN_KEY
-
-
 _LIMITER = Limiter(
     key_func=get_remote_address,
     default_limits=[],                  # apply per-route via decorators
@@ -570,21 +570,17 @@ def status():
 #
 # Why gate reads:  the merged map data is shared with friends via reader-
 # tier keys.  Public reads would let anyone scrape the full catalog without
-# any way to revoke access if a key holder misbehaves.  Each call also
-# bumps the key's last_used + uploads counter so the operator can see who
-# is actively pulling.
+# any way to revoke access if a key holder misbehaves.
 #
-# Master ADMIN_KEY is rate-limit-exempt (see _is_admin_request) so the
-# operator's own admin tooling never trips its own limits.
+# All requests (admin included) share the same per-IP rate buckets; the
+# limits are loose enough that the operator's own tooling won't trip them.
 # ---------------------------------------------------------------------------
 
 @app.get('/saturated.json')
-@_LIMITER.limit('120/minute', exempt_when=_is_admin_request)
+@_LIMITER.limit('120/minute')
 def get_saturated(request: Request,
                   x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
-    if not _is_admin_request(request):
-        # _LIMITER.limit decorator above already checked the IP rate; auth-check now.
-        _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     p = SIDECAR / 'saturated.json'
     if not p.exists():
         return JSONResponse({'updated_at': 0, 'zones': [], 'pit_worlds': []})
@@ -592,11 +588,10 @@ def get_saturated(request: Request,
 
 
 @app.get('/coverage')
-@_LIMITER.limit('120/minute', exempt_when=_is_admin_request)
+@_LIMITER.limit('120/minute')
 def get_coverage(request: Request,
                  x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
-    if not _is_admin_request(request):
-        _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     p = DATA_DIR / 'coverage.json'
     if not p.exists():
         raise HTTPException(404, 'No merge has run yet.')
@@ -604,11 +599,10 @@ def get_coverage(request: Request,
 
 
 @app.get('/actor-index')
-@_LIMITER.limit('120/minute', exempt_when=_is_admin_request)
+@_LIMITER.limit('120/minute')
 def get_actor_index(request: Request,
                     x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
-    if not _is_admin_request(request):
-        _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     p = DATA_DIR / '_actor_index.json'
     if not p.exists():
         raise HTTPException(404, 'No merge has run yet.')
@@ -616,11 +610,10 @@ def get_actor_index(request: Request,
 
 
 @app.get('/zones/{key}')
-@_LIMITER.limit('120/minute', exempt_when=_is_admin_request)
+@_LIMITER.limit('120/minute')
 def get_zone(key: str, request: Request,
              x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
-    if not _is_admin_request(request):
-        _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     safe = _safe_filename(key + '.json')
     if not safe:
         raise HTTPException(400, 'Bad zone key.')
@@ -656,11 +649,10 @@ def get_zone(key: str, request: Request,
 
 
 @app.get('/zones')
-@_LIMITER.limit('120/minute', exempt_when=_is_admin_request)
+@_LIMITER.limit('120/minute')
 def list_zones(request: Request,
                x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
-    if not _is_admin_request(request):
-        _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
     zones = sorted(DATA_DIR.glob('*.json'))
     return {'zones': [z.stem for z in zones if not z.name.startswith('_')]}
 
@@ -712,7 +704,7 @@ def list_uploaders():
 
 
 @app.post('/upload')
-@_LIMITER.limit('60/minute', exempt_when=_is_admin_request)
+@_LIMITER.limit('60/minute')
 async def upload(
     request: Request,
     files: list[UploadFile] = File(...),
