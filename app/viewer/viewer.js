@@ -83,6 +83,13 @@ const S = {
     pathPath:      null,        // [{cx, cy}]
     cellSet:       null,        // Set of "cx,cy" walkable cells (for the active floor)
     cellRes:       0.5,
+    // In-memory cache of merged zone JSONs.  Keyed by zone key.  Wiped
+    // whenever refreshStatus() detects a new merge timestamp (since the
+    // merger having run means every zone may have changed).  Combined with
+    // the server's conditional-GET (304) handling, this makes re-visiting
+    // a zone within the same session effectively instant.
+    zoneCache:     {},
+    loadingKey:    null,        // zone we're currently fetching, for stale-response detection
     adminKey:      localStorage.getItem('warmap_admin_key') || '',
     // Orientation: world-axis -> canvas-axis transform.  D4's coord system
     // doesn't map cleanly to "north up", so we let the user dial it in.
@@ -220,6 +227,12 @@ async function refreshStatus() {
         D.state.textContent = `${s.dumps_count} dumps · ${s.zones_count} zones · last merge ${fin ? prettyAgo(fin) : 'never'}`;
         if (fin && fin !== S.lastMergeT) {
             S.lastMergeT = fin;
+            // The merger ran -- every zone may have changed.  Wipe the
+            // in-memory zone cache so the next click on each zone gets
+            // the fresh JSON.  The browser cache layer handles the case
+            // where individual zones haven't actually changed (server
+            // returns 304, no body downloaded).
+            S.zoneCache = {};
             await refreshZoneList();
             await refreshUploaders();
             if (S.currentKey) await loadZone(S.currentKey, false);
@@ -403,44 +416,82 @@ async function fetchUploaderTracks(cid) {
 // ---- Zone load + render --------------------------------------------------
 async function loadZone(key, resetView) {
     S.currentKey = key;
+    S.loadingKey = key;
     document.querySelectorAll('.zone-list li').forEach(li => {
         li.classList.toggle('active', li.dataset.key === key);
     });
     D.empty.hidden = true;
     D.zoneView.hidden = false;
-    try {
-        const d = await getJSON('/zones/' + encodeURIComponent(key));
-        S.currentData = d;
-        D.zoneTitle.textContent = d.key;
-        const floors = Object.keys(d.grid?.floors || {});
-        if (floors.length > 1) {
-            D.floorCtl.hidden = false;
-            D.floorSelect.innerHTML = '';
-            for (const f of floors) {
-                const opt = document.createElement('option');
-                opt.value = f; opt.textContent = `floor ${f}`;
-                D.floorSelect.appendChild(opt);
-            }
-            if (!floors.includes(S.currentFloor)) S.currentFloor = floors[0];
-            D.floorSelect.value = S.currentFloor;
-        } else {
-            D.floorCtl.hidden = true;
-            S.currentFloor = floors[0] || '1';
-        }
-        if (resetView) {
-            S.view = { panX: 0, panY: 0, scale: 1.0 };
-            S.selectedActor = null;
-            S.pathA = S.pathB = S.pathPath = null;
-            renderActorPanel();
-            updatePathStatus();
-        }
-        rebuildCellSet();
-        renderMeta();
-        render();
-    } catch (e) {
-        D.zoneTitle.textContent = key;
-        D.zoneMeta.textContent = `failed: ${e.message}`;
+
+    // Cache hit: paint instantly, skip the network entirely.
+    const cached = S.zoneCache[key];
+    if (cached) {
+        applyZoneData(cached, resetView);
+        return;
     }
+
+    // Cache miss: show loading state immediately so the click feels
+    // responsive even on slow networks / fresh-merge re-fetches.
+    D.zoneTitle.textContent = key;
+    D.zoneMeta.innerHTML = '<span class="muted">loading...</span>';
+    S.currentData = null;
+    S.cellSet = null;
+    // Clear the canvas so the user doesn't see stale data from the
+    // previous zone while the new one is fetching.
+    const w = D.canvas.width, h = D.canvas.height;
+    ctx.fillStyle = '#06090d';
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#8b949e'; ctx.font = '14px sans-serif';
+    ctx.fillText(`loading ${key}...`, 20, 24);
+
+    try {
+        // Default browser cache (NOT 'no-store') so the server's ETag /
+        // Last-Modified handling can return 304 with no body when nothing
+        // changed.  Cuts re-visit cost from full payload to header-only.
+        const d = await getJSON('/zones/' + encodeURIComponent(key), { cache: 'default' });
+        // Race guard: user might have clicked another zone while this one
+        // was in flight.  Discard if so.
+        if (S.loadingKey !== key) return;
+        S.zoneCache[key] = d;
+        applyZoneData(d, resetView);
+    } catch (e) {
+        if (S.loadingKey === key) {
+            D.zoneTitle.textContent = key;
+            D.zoneMeta.textContent = `failed: ${e.message}`;
+        }
+    }
+}
+
+// Render whatever zone data we already have (from cache or fresh fetch).
+// Pulled out of loadZone so cache hits skip every step of the network path.
+function applyZoneData(d, resetView) {
+    S.currentData = d;
+    D.zoneTitle.textContent = d.key;
+    const floors = Object.keys(d.grid?.floors || {});
+    if (floors.length > 1) {
+        D.floorCtl.hidden = false;
+        D.floorSelect.innerHTML = '';
+        for (const f of floors) {
+            const opt = document.createElement('option');
+            opt.value = f; opt.textContent = `floor ${f}`;
+            D.floorSelect.appendChild(opt);
+        }
+        if (!floors.includes(S.currentFloor)) S.currentFloor = floors[0];
+        D.floorSelect.value = S.currentFloor;
+    } else {
+        D.floorCtl.hidden = true;
+        S.currentFloor = floors[0] || '1';
+    }
+    if (resetView) {
+        S.view = { panX: 0, panY: 0, scale: 1.0 };
+        S.selectedActor = null;
+        S.pathA = S.pathB = S.pathPath = null;
+        renderActorPanel();
+        updatePathStatus();
+    }
+    rebuildCellSet();
+    renderMeta();
+    render();
 }
 
 function rebuildCellSet() {
