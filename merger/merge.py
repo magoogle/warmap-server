@@ -115,7 +115,8 @@ class Record:
     started_at: int
     ended_at: int
     complete: bool                              # footer line was present
-    floor_worlds: dict[int, str]                # floor_idx -> world name
+    floor_worlds:    dict[int, str]             # floor_idx -> world name
+    floor_world_ids: dict[int, int]             # floor_idx -> world_id (hash)
     samples: list[dict]
     events: list[dict]
     actors: list[dict]
@@ -142,7 +143,8 @@ def parse_ndjson(path: Path) -> Optional[Record]:
     events: list[dict] = []
     actors: list[dict] = []
     grid: dict[int, list[tuple[int, int, int]]] = collections.defaultdict(list)
-    floor_worlds: dict[int, str] = {}
+    floor_worlds:    dict[int, str] = {}
+    floor_world_ids: dict[int, int] = {}
     grid_resolution = 0.5
     complete = False
 
@@ -165,7 +167,8 @@ def parse_ndjson(path: Path) -> Optional[Record]:
         t = obj.get('type')
         if t == 'header':
             header = obj
-            floor_worlds[1] = obj.get('world', '')
+            floor_worlds[1]    = obj.get('world', '')
+            floor_world_ids[1] = obj.get('world_id', 0)
             # New header field carries the recorder's cell-derivation
             # resolution; old headers omit it and we fall back to the
             # 0.5m default below.
@@ -177,10 +180,13 @@ def parse_ndjson(path: Path) -> Optional[Record]:
             events.append(obj)
             if obj.get('kind') == 'floor_change':
                 meta = obj.get('metadata') or {}
-                to_floor = meta.get('to_floor')
-                to_world = meta.get('to_world')
+                to_floor    = meta.get('to_floor')
+                to_world    = meta.get('to_world')
+                to_world_id = meta.get('to_world_id')
                 if to_floor and to_world:
                     floor_worlds[to_floor] = to_world
+                if to_floor and to_world_id:
+                    floor_world_ids[to_floor] = to_world_id
         elif t == 'actor':
             actors.append(obj)
         elif t == 'grid_cell':
@@ -225,6 +231,7 @@ def parse_ndjson(path: Path) -> Optional[Record]:
         ended_at=header.get('ended_at', 0),
         complete=complete,
         floor_worlds=floor_worlds,
+        floor_world_ids=floor_world_ids,
         samples=samples,
         events=events,
         actors=actors,
@@ -296,6 +303,23 @@ class ActorAgg:
 
 
 @dataclass
+class FloorMetaAgg:
+    """Per-floor diagnostics surfaced via the curated JSON.  Lets the
+    viewer show 'floor 3 -> world=DGN_Skov_Aegoye_Boss, world_id=...'
+    in the zone-details dropdown without having to crack open dump
+    files.
+
+    `worlds` accumulates all distinct world names ever seen on this
+    floor (typically one per zone, but the same floor index can repeat
+    across sessions if floor-change detection is fuzzy on a particular
+    zone -- a multi-name list is itself a useful diagnostic).  Same for
+    world_ids."""
+    worlds:    set[str] = field(default_factory=set)
+    world_ids: set[int] = field(default_factory=set)
+    sessions:  set[str] = field(default_factory=set)
+
+
+@dataclass
 class KeyAgg:
     """Aggregated geometry + actors for one merge key (zone or pit-world)."""
     key: str
@@ -307,6 +331,15 @@ class KeyAgg:
     actors: dict[ActorKey, ActorAgg] = field(default_factory=dict)
     sessions: set[str] = field(default_factory=set)
     activity_kinds: set[str] = field(default_factory=set)
+    # All-floors world tracking -- set so re-runs that observe the same
+    # name don't bloat memory.  Surfaced in the curated JSON as sorted
+    # lists.
+    worlds:    set[str] = field(default_factory=set)
+    world_ids: set[int] = field(default_factory=set)
+    # Per-floor breakdown (floor_idx -> FloorMetaAgg).  defaultdict so
+    # callers can floors_meta[k].worlds.add(...) without a key check.
+    floors_meta: dict[int, FloorMetaAgg] = field(
+        default_factory=lambda: collections.defaultdict(FloorMetaAgg))
     # Saturation tracking: history of cells_total after each session merge
     cells_history: list[tuple[int, int]] = field(default_factory=list)
                                                     # [(unix_ts, cells_total), ...]
@@ -330,6 +363,18 @@ def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
             agg.activity_kinds.add('pit')
             agg.sessions.add(rec.session_id)
             agg.grid_resolution = rec.grid_resolution
+            # Pit key IS the world name -- worlds set is degenerate
+            # (always one entry == agg.key) but we still record it so
+            # the viewer code path is uniform across zone/pit_world.
+            agg.worlds.add(world)
+            wid = rec.floor_world_ids.get(floor_idx)
+            if wid:
+                agg.world_ids.add(wid)
+            fm = agg.floors_meta[1]
+            fm.worlds.add(world)
+            if wid:
+                fm.world_ids.add(wid)
+            fm.sessions.add(rec.session_id)
             cell_map = agg.cells_by_floor[1]   # within the template, only one floor
             for cx, cy, w in cells:
                 _vote_cell(cell_map, cx, cy, w)
@@ -344,6 +389,24 @@ def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
         agg.activity_kinds.add(rec.activity_kind)
         agg.sessions.add(rec.session_id)
         agg.grid_resolution = rec.grid_resolution
+        # Zone-level worlds: one entry for static zones (DGN, town,
+        # helltide, overworld) but multi-floor zones (undercity) can
+        # legitimately have several -- e.g. UC_BugCave + UC_BugCave_Boss.
+        if rec.world:
+            agg.worlds.add(rec.world)
+        if rec.world_id:
+            agg.world_ids.add(rec.world_id)
+        # Per-floor meta: prefer the floor-change-event-tracked maps
+        # (they cover every floor visited mid-session) and fall back to
+        # the header's zone-level world+world_id for floors that were
+        # never explicitly transitioned to.
+        for floor_idx in rec.grid_cells_by_floor.keys():
+            fm = agg.floors_meta[floor_idx]
+            fw  = rec.floor_worlds.get(floor_idx)    or rec.world
+            fwi = rec.floor_world_ids.get(floor_idx) or rec.world_id
+            if fw:  fm.worlds.add(fw)
+            if fwi: fm.world_ids.add(fwi)
+            fm.sessions.add(rec.session_id)
         for floor_idx, cells in rec.grid_cells_by_floor.items():
             cell_map = agg.cells_by_floor[floor_idx]
             for cx, cy, w in cells:
@@ -546,6 +609,19 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
 
     saturated, sat_info = is_saturated(agg)
 
+    # Per-floor diagnostic block.  Mirrors the cells_out_by_floor key
+    # convention (str(floor_idx)) so the viewer can index both maps
+    # with the same key.  Sessions count rather than the full session
+    # ID set -- the set can be 100+ entries on busy zones; consumers
+    # don't need the IDs, just the count.
+    floors_meta_out: dict[str, dict] = {}
+    for fid, fm in agg.floors_meta.items():
+        floors_meta_out[str(fid)] = {
+            'worlds':        sorted(fm.worlds),
+            'world_ids':     sorted(fm.world_ids),
+            'sessions':      len(fm.sessions),
+        }
+
     payload = {
         'schema_version': SCHEMA_VERSION_SUPPORTED,
         'key':       agg.key,
@@ -555,10 +631,20 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
         'activity_kinds':   sorted(agg.activity_kinds),
         'saturated':        saturated,
         'saturation_info':  sat_info,
+        # Top-level world identifiers seen across all sessions for this
+        # merge key.  Lists rather than scalars because the same zone
+        # name (e.g. an undercity dungeon) can host multiple worlds
+        # across its floors.
+        'worlds':           sorted(agg.worlds),
+        'world_ids':        sorted(agg.world_ids),
         'grid': {
             'resolution': agg.grid_resolution,
             'bbox': bbox,
             'floors': cells_out_by_floor,
+            # Per-floor world + session breakdown (NEW).  Same key set
+            # as 'floors' so a viewer can iterate floors and pull both
+            # the cell list and the meta with one loop.
+            'floors_meta': floors_meta_out,
         },
         'actors': actors_out,
     }
@@ -814,13 +900,18 @@ def _parse_legacy(path: Path) -> Optional[Record]:
     actors = []
     if isinstance(data.get('geometry'), dict):
         actors = data['geometry'].get('actors') or []
-    fw = {1: data.get('world', '')}
+    fw  = {1: data.get('world', '')}
+    fwi = {1: data.get('world_id', 0)}
     for ev in (data.get('events') or []):
         if ev.get('kind') == 'floor_change':
             meta = ev.get('metadata') or {}
-            tf, tw = meta.get('to_floor'), meta.get('to_world')
+            tf, tw, twid = (meta.get('to_floor'),
+                            meta.get('to_world'),
+                            meta.get('to_world_id'))
             if tf and tw:
                 fw[tf] = tw
+            if tf and twid:
+                fwi[tf] = twid
     return Record(
         schema_version=data.get('schema_version', 0),
         session_id=data.get('session_id', ''),
@@ -832,6 +923,7 @@ def _parse_legacy(path: Path) -> Optional[Record]:
         ended_at=data.get('ended_at', 0),
         complete=True,                                    # legacy = always complete
         floor_worlds=fw,
+        floor_world_ids=fwi,
         samples=data.get('samples') or [],
         events=data.get('events') or [],
         actors=actors,

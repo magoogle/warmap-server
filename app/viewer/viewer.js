@@ -890,16 +890,31 @@ function renderZoneDetails() {
     const fmtNum = n => Number(n || 0).toLocaleString();
     const fmtTs  = ts => ts ? new Date(ts * 1000).toLocaleString() : '--';
 
-    // ---- Per-floor breakdown (cells walkable + actors) ----
+    // ---- Per-floor breakdown (cells walkable + actors + worlds + ids) ----
     const floors = z.grid?.floors || {};
+    const floorsMeta = z.grid?.floors_meta || {};
     const actorsAll = z.actors || [];
     const floorIds = Object.keys(floors).sort((a, b) => Number(a) - Number(b));
+    // Display helpers for the worlds/ids columns: fold long lists to
+    // "first +N more" so the table row doesn't blow out horizontally
+    // when a zone has multiple worlds across re-runs.
+    const fmtList = (arr, max = 2) => {
+        if (!Array.isArray(arr) || arr.length === 0) return '<span class="muted">--</span>';
+        const head = arr.slice(0, max).map(esc).join(', ');
+        if (arr.length <= max) return head;
+        return `${head} <span class="muted">+${arr.length - max}</span>`;
+    };
     const floorRows = floorIds.map(fid => {
         const cells   = (floors[fid] || []).length;
         const actorsF = actorsAll.filter(a => String(a.floor) === fid).length;
+        const meta    = floorsMeta[fid] || {};
         const cur = String(S.currentFloor) === fid ? ' (active)' : '';
         return `<tr><td>floor ${esc(fid)}${cur}</td>` +
-               `<td>${fmtNum(cells)}</td><td>${fmtNum(actorsF)}</td></tr>`;
+               `<td>${fmtNum(cells)}</td>` +
+               `<td>${fmtNum(actorsF)}</td>` +
+               `<td>${fmtList(meta.worlds)}</td>` +
+               `<td>${fmtList(meta.world_ids)}</td>` +
+               `<td>${fmtNum(meta.sessions || 0)}</td></tr>`;
     }).join('');
 
     // ---- Per-kind actor breakdown (active floor only -- matches what the
@@ -933,12 +948,23 @@ function renderZoneDetails() {
     const totalActors = actorsAll.length;
     const totalCells  = floorIds.reduce((acc, fid) => acc + (floors[fid] || []).length, 0);
 
+    // World identifiers: top-level lists from the merger's KeyAgg.
+    // Fall back to "--" for older curated JSONs (pre-worlds-tracking) so
+    // the dropdown stays informative even before a re-merge sweep
+    // upgrades the on-disk files.
+    const worlds    = Array.isArray(z.worlds)    ? z.worlds    : [];
+    const worldIds  = Array.isArray(z.world_ids) ? z.world_ids : [];
+    const worldsStr   = worlds.length    ? worlds.map(esc).join(', ')        : '<span class="muted">-- (re-merge to populate)</span>';
+    const worldIdsStr = worldIds.length  ? worldIds.map(String).join(', ')   : '<span class="muted">-- (re-merge to populate)</span>';
+
     D.zoneDetails.innerHTML = `
       <div class="det-grid">
         <span class="k">key</span>           <span class="v">${esc(z.key || '--')}</span>
         <span class="k">type</span>          <span class="v">${esc(z.key_type || '--')}</span>
         <span class="k">activity</span>      <span class="v">${acts}</span>
         <span class="k">schema</span>        <span class="v">v${esc(z.schema_version ?? '--')}</span>
+        <span class="k">worlds</span>        <span class="v">${worldsStr}</span>
+        <span class="k">world ids</span>     <span class="v">${worldIdsStr}</span>
         <span class="k">sessions</span>      <span class="v">${fmtNum(z.sessions_merged)}</span>
         <span class="k">saturated</span>     <span class="v ${satClass}">${satText}</span>
         <span class="k">merged</span>        <span class="v">${fmtTs(z.merged_at)}</span>
@@ -954,7 +980,10 @@ function renderZoneDetails() {
       <div class="det-subsection">
         <h4>per-floor</h4>
         <table class="det-table">
-          <thead><tr><th>floor</th><th>cells</th><th>actors</th></tr></thead>
+          <thead><tr>
+            <th>floor</th><th>cells</th><th>actors</th>
+            <th>world(s)</th><th>world id(s)</th><th>sessions</th>
+          </tr></thead>
           <tbody>${floorRows}</tbody>
         </table>
       </div>` : ''}
