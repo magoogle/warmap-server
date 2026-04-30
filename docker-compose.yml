@@ -7,13 +7,20 @@ services:
     container_name: warmap-server
     restart: unless-stopped
 
-    # 30100 = public upload + read API (auth required for writes)
-    # 30101 = same app, exposed for the live viewer; UFW + cloud firewall
-    #         restrict this port to the operator's IP, so the viewer
-    #         doesn't need its own auth.
+    # Single port, bound only to the management interface so the service
+    # is only reachable via the LAN -- pfSense HAProxy proxies in from
+    # there.  No public exposure on the host; everything goes through:
+    #
+    #   Internet -> Cloudflare (orange cloud, edge cert) -> pfSense:443
+    #     -> HAProxy frontend (Host: d4data.live SNI check)
+    #       -> HAProxy backend (HTTP, LAN-internal)
+    #         -> 192.168.10.91:8000  (this server)
+    #
+    # If you ever need to test from another LAN host, change the bind to
+    # "0.0.0.0:8000:8000" or "192.168.10.0/24" -- but the default is
+    # locked to mgmt0 so no surprises.
     ports:
-      - "30100:8000"
-      - "30101:8000"
+      - "192.168.10.91:8000:8000"
 
     environment:
       WARMAP_API_KEY:           ${WARMAP_API_KEY:?missing WARMAP_API_KEY}
