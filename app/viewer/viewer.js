@@ -172,6 +172,12 @@ const ACTOR_STYLE = {
     // Hordes interactables (pylons = the wave-modifier "boons" players pick)
     pylon:                   { c: '#33ff99', sym: 'p',  label: 'Pylon' },
     aether_structure:        { c: '#99ccff', sym: 'a',  label: 'Aether' },
+    // Wells (XP wells, season pacts, healing wells, etc.)
+    well:                    { c: '#ffff66', sym: 'w',  label: 'Well' },
+    // Generic catch-all for interactables that didn't match a specific kind.
+    // Greyed out so it doesn't dominate the map; user can filter to it
+    // when investigating "what's that thing the bot ignored".
+    interactable:            { c: '#666666', sym: '?',  label: 'Other' },
 };
 const KIND_OVERRIDES = {
     pit_obelisk:'Pit Obelisk', undercity_obelisk:'Undercity Obelisk',
@@ -185,6 +191,7 @@ const KIND_OVERRIDES = {
     objective:'Objective', enticement:'Beacon',
     boss:'Boss', elite:'Elite', champion:'Champion',
     pylon:'Hordes Pylon', aether_structure:'Aether Structure',
+    well:'Well', interactable:'Other Interactable',
 };
 
 function actorDisplayName(a) {
