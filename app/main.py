@@ -211,8 +211,45 @@ def _import_merger():
 #   /upload                    60/min   (multipart, server cost)
 #   /zones, /zones/{key}, etc  120/min  (~2/s sustained, plenty for friend syncs)
 #   /admin/*                    30/min   (rare ops, tight ceiling)
+def _real_client_ip(request: Request) -> str:
+    """Return the actual remote client IP, even when sitting behind a
+    proxy chain like Cloudflare -> pfSense HAProxy -> warmap-server.
+
+    Header priority (highest to lowest trust):
+      1. CF-Connecting-IP -- set by Cloudflare's edge.  Authoritative for
+         requests proxied through CF (orange cloud).  We trust this only
+         because origin is firewalled to CF's IP ranges; if you ever
+         expose the origin directly, drop CF-Connecting-IP from the list
+         since it can be spoofed.
+      2. X-Real-IP -- set by pfSense HAProxy (`http-request add-header
+         X-Real-IP %[src]`).  Reflects HAProxy's view of the source,
+         which is CF's edge IP when going through CF.  Useful as a
+         fallback when CF-Connecting-IP is missing (direct LAN test
+         hits, etc.).
+      3. X-Forwarded-For first hop -- HAProxy's `option forwardfor` adds
+         this; same data as X-Real-IP in our setup.
+      4. request.client.host -- raw TCP source.  Will be the docker
+         bridge IP (172.20.0.1) for proxied requests, useless for
+         per-client rate limiting.
+
+    The chosen value is what slowapi keys per-IP rate limit buckets on.
+    """
+    h = request.headers
+    cf = h.get('cf-connecting-ip')
+    if cf:
+        return cf.strip()
+    xri = h.get('x-real-ip')
+    if xri:
+        return xri.strip()
+    xff = h.get('x-forwarded-for')
+    if xff:
+        # First entry in the comma-separated list is the original client.
+        return xff.split(',', 1)[0].strip()
+    return get_remote_address(request)
+
+
 _LIMITER = Limiter(
-    key_func=get_remote_address,
+    key_func=_real_client_ip,
     default_limits=[],                  # apply per-route via decorators
     storage_uri='memory://',
 )
