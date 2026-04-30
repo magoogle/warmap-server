@@ -924,7 +924,7 @@ async function keyAction(act, name) {
     if (act === 'disable')        url = `/admin/keys/${encodeURIComponent(name)}/disable`;
     else if (act === 'enable')    url = `/admin/keys/${encodeURIComponent(name)}/enable`;
     else if (act === 'delete') {
-        if (!confirm(`Delete key for ${name}? Their uploads stop working immediately.`)) return;
+        if (!confirm(`Delete key for ${name}?\n\nThis also removes ALL their dumps + sessions and triggers a re-merge so they disappear from Uploaders + zones.\n\nUse "disable" instead if you just want to revoke their key while keeping their historical contributions.`)) return;
         url = `/admin/keys/${encodeURIComponent(name)}`; method = 'DELETE';
     } else if (act === 'quarantine') {
         if (!confirm(`Move ALL of ${name}'s uploads to quarantine and disable their key?`)) return;

@@ -585,12 +585,42 @@ def admin_enable_key(
 @app.delete('/admin/keys/{name}')
 def admin_delete_key(
     name: str,
+    keep_data: bool = False,
     x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
 ):
+    """Delete a key.  By default cascades: also wipes the uploader's
+    sessions + dump files so they vanish from the Uploaders tab.  Pass
+    ?keep_data=true to revoke the key but keep their historical
+    contributions (rare; equivalent to old behavior)."""
     _check_admin(x_warmap_key)
     if not DBI.remove_key(name):
         raise HTTPException(404, 'No such key.')
-    return {'ok': True, 'removed': name}
+    if keep_data:
+        return {'ok': True, 'removed': name, 'cascade': False}
+
+    # Cascade: remove their dump files + sessions rows.
+    safe_name = ''.join(c for c in name if c.isalnum() or c in '_-')[:32]
+    if safe_name:
+        rows = DBI.list_sessions(client_id=safe_name, limit=10000)
+        deleted_files = 0
+        for r in rows:
+            DBI.remove_session(r['name'])
+            p = DUMPS_DIR / r['name']
+            try:
+                if p.exists():
+                    p.unlink()
+                    deleted_files += 1
+            except OSError:
+                pass
+        # Re-merge so zone JSONs and the actors index drop their contributions.
+        threading.Thread(target=_run_merge, daemon=True).start()
+        return {
+            'ok': True, 'removed': name, 'cascade': True,
+            'sessions_removed': len(rows),
+            'files_deleted':    deleted_files,
+        }
+    return {'ok': True, 'removed': name, 'cascade': True,
+            'sessions_removed': 0, 'files_deleted': 0}
 
 
 @app.post('/admin/quarantine/{name}')
