@@ -191,6 +191,11 @@ const ACTOR_STYLE = {
     // Greyed out so it doesn't dominate the map; user can filter to it
     // when investigating "what's that thing the bot ignored".
     interactable:            { c: '#666666', sym: '?',  label: 'Other' },
+    // Event-doors / boss-fight firewalls.  These are transient barriers
+    // that gate boss arenas during fights.  Distinct color (electric
+    // purple) so they pop visually -- when you see one, the surrounding
+    // unsampled-cells region is "boss arena" and not "actually unwalkable."
+    event_door:              { c: '#c478ff', sym: 'F',  label: 'Event Door' },
 };
 // ---------------------------------------------------------------------------
 // Layer system -- group actor `kind`s into operator-friendly categories so
@@ -234,6 +239,7 @@ const KIND_CATEGORY = {
     pit_obelisk:             'objectives',
     undercity_obelisk:       'objectives',
     well:                    'objectives',
+    event_door:              'objectives',   // boss-arena gates / firewalls
     // NPCs / vendors
     npc:                     'npcs',
     npc_vendor:              'npcs',
@@ -842,6 +848,20 @@ function render() {
 
     const cellSize = Math.max(1, scale);
     if (S.layers?.walkable_grid !== false) {
+        // Draw a subtle "no-data" tint over the entire zone bbox FIRST,
+        // so anywhere the recorder hasn't sampled yet (boss arenas
+        // gated by event-doors / firewalls, off-path corners, etc.)
+        // shows up as a faint blue-grey rather than the same scary
+        // jet-black as "outside the world entirely."  Walkable + blocked
+        // cells get drawn on top of this tint, overwriting it where we
+        // do have data.
+        const bbX = offX + bbox.minx*scale;
+        const bbY = (h - offY) - bbox.maxy*scale;
+        const bbW = (bbox.maxx - bbox.minx + 1) * scale;
+        const bbH = (bbox.maxy - bbox.miny + 1) * scale;
+        ctx.fillStyle = 'rgba(50, 60, 80, 0.55)';
+        ctx.fillRect(bbX, bbY, bbW, bbH);
+
         for (const c of cells) {
             const t = applyOrient(c[0], c[1], rawBbox);
             const walk = c[2], conf = c[3];
@@ -1168,7 +1188,56 @@ function renderActorPanel() {
     row('observations',  a.total_observations);
     if (a.is_boss)  row('flag', 'BOSS');
     if (a.is_elite) row('flag', 'ELITE');
+
+    // Admin-only "Ignore this skin" action.  Adds the actor's skin to
+    // the server's dynamic ignore list (POST /admin/ignore); on success
+    // the merger drops matching actors from existing aggregates on the
+    // next cycle, AND the uploader syncs the updated list to the
+    // recorder's core/ignore_dynamic.lua so future recorder sessions
+    // also stop emitting them.
+    if (S.tier === 'admin' && a.skin) {
+        rows.push(
+            `<div class="actor-actions">
+                <button class="ignore-skin-btn" data-skin="${esc(a.skin)}"
+                        title="Add this skin to the server-side ignore list. Merger will drop it on next cycle; recorder picks up the change on its next /reload via the uploader.">
+                    Ignore this skin
+                </button>
+                <span class="ignore-skin-status muted"></span>
+            </div>`);
+    }
     D.actorBody.innerHTML = rows.join('');
+
+    // Wire the button (after innerHTML so the element exists).
+    const btn = D.actorBody.querySelector('.ignore-skin-btn');
+    const status = D.actorBody.querySelector('.ignore-skin-status');
+    if (btn) {
+        btn.addEventListener('click', async () => {
+            const skin = btn.dataset.skin;
+            btn.disabled = true;
+            if (status) status.textContent = 'sending...';
+            try {
+                const r = await adminFetch('/admin/ignore', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pattern: skin, note: 'viewer-click' }),
+                });
+                if (!r.ok) {
+                    if (status) status.textContent = 'failed: HTTP ' + r.status;
+                    btn.disabled = false;
+                    return;
+                }
+                const j = await r.json();
+                if (status) status.textContent = j.added ? 'added ✓' : 'already ignored';
+                btn.textContent = 'Ignored ✓';
+                // Trigger an immediate re-merge so the user sees the
+                // ignored skin disappear from the map within ~30s.
+                adminFetch('/merge', { method: 'POST' });
+            } catch (e) {
+                if (status) status.textContent = 'failed: ' + (e?.message || e);
+                btn.disabled = false;
+            }
+        });
+    }
 }
 D.actorClose.addEventListener('click', () => { S.selectedActor = null; renderActorPanel(); render(); });
 

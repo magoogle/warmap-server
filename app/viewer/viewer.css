@@ -1011,3 +1011,36 @@ button {
 .tier-pill.tier-admin    { background: rgba(255,91,108,0.12);  color: var(--bad);    border-color: rgba(255,91,108,0.35); }
 .tier-pill.tier-uploader { background: rgba(63,207,114,0.12);  color: var(--ok);     border-color: rgba(63,207,114,0.35); }
 .tier-pill.tier-reader   { background: rgba(92,199,255,0.12);  color: var(--info);   border-color: rgba(92,199,255,0.35); }
+
+/* Actor info panel: admin-only "Ignore this skin" action.  Sits at the
+   bottom of the panel below the field rows. */
+.actor-actions {
+    margin-top: 0.7rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+.ignore-skin-btn {
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: var(--r-sm);
+    padding: 0.32rem 0.7rem;
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: all 0.1s;
+}
+.ignore-skin-btn:hover {
+    background: rgba(255,91,108,0.10);
+    color: var(--bad);
+    border-color: rgba(255,91,108,0.35);
+}
+.ignore-skin-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+.ignore-skin-status {
+    font-size: 0.75rem;
+}
