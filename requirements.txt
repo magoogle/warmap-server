@@ -5,3 +5,9 @@ python-multipart>=0.0.7
 # per-worker, which is fine for our threat model (deters scrapers, not
 # DDoS).  See _LIMITER setup in app/main.py.
 slowapi>=0.1.9,<1
+
+# 2-5x faster JSON parsing than the stdlib `json` module.  Drop-in for
+# loads().  The merger reads ~580 NDJSON files every cycle, so the
+# parse step is the dominant cost; orjson cuts it meaningfully.  See
+# merger/merge.py's parse_ndjson + the parse cache it sits behind.
+orjson>=3.9,<4

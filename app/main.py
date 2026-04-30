@@ -450,10 +450,19 @@ def _run_merge() -> dict:
             try:
                 merge = _import_merger()
                 state = merge.merge_all(DUMPS_DIR, only_complete=False)
-                merge.emit_all(state, DATA_DIR, SIDECAR)
+                # Selective emit: when the merger ran in incremental mode
+                # it tells us which zone keys were touched this cycle, so
+                # we only re-emit those .json files (instead of all 90+
+                # every cycle).  On a full rebuild last_touched_keys
+                # equals state.keys() so emit_all writes everything.
+                touched = getattr(merge.merge_all, 'last_touched_keys', None)
+                merge_mode = getattr(merge.merge_all, 'last_mode', '')
+                merge.emit_all(state, DATA_DIR, SIDECAR, only_keys=touched)
                 accepted = sum(len(agg.sessions) for agg in state.values())
                 _last_merge['accepted'] = accepted
                 _last_merge['skipped']  = 0
+                _last_merge['mode']     = merge_mode
+                _last_merge['touched']  = len(touched) if touched else 0
 
                 # Refresh DB index off the same set of files the merger just read.
                 # Cheap because we're only re-summarising headers + last samples.

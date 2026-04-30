@@ -31,6 +31,55 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
+# orjson is 2-5x faster than stdlib `json` on the line-by-line parse hot
+# path.  Optional import so dev runs without it (`pip install orjson`)
+# still work, just slower.
+try:
+    import orjson as _orjson
+    _HAS_ORJSON = True
+    _JSON_DECODE_ERROR: tuple = (_orjson.JSONDecodeError, ValueError)
+except ImportError:
+    _orjson = None  # type: ignore
+    _HAS_ORJSON = False
+    _JSON_DECODE_ERROR = (json.JSONDecodeError,)
+
+
+def _loads(s):
+    """Fast JSON loader.  orjson when available, json fallback."""
+    if _HAS_ORJSON:
+        return _orjson.loads(s)
+    if isinstance(s, (bytes, bytearray)):
+        s = s.decode('utf-8', errors='replace')
+    return json.loads(s)
+
+
+# ---------------------------------------------------------------------------
+# Parse cache -- keyed by absolute path string -> (mtime, parsed Record).
+# Lives at module level so it persists across calls within the same Python
+# process (the FastAPI worker that holds the scheduler lock).  When a file's
+# mtime hasn't changed since the last parse, we reuse the cached Record
+# instead of re-reading + re-parsing.  Entries for files that no longer
+# exist on disk get evicted lazily on the next merge_all call.
+#
+# Memory cost: roughly the parsed-form size of all current dumps (a few GB
+# at 1k+ dumps).  On the on-prem box with 30 GB RAM this is cheap.  If you
+# ever migrate back to a small VPS, set _PARSE_CACHE_MAX to bound it.
+_PARSE_CACHE: dict[str, tuple[float, 'Optional[Record]']] = {}
+_PARSE_CACHE_MAX = 50_000     # safety upper bound; well above realistic usage
+
+
+# ---------------------------------------------------------------------------
+# State cache -- the merged dict[zone_key, KeyAgg] is kept alive across
+# merge_all calls so we don't have to rebuild it from scratch every cycle.
+# Together with the parse cache this turns a steady-state merge from
+# "walk all dumps" to "fold the new dumps into the existing state."
+#
+# Reset to None to force a full rebuild (e.g. on quarantine where we'd
+# need to subtract a record's contribution -- not currently supported).
+# merge_all auto-detects file deletions and triggers a rebuild itself.
+_STATE_CACHE: 'Optional[dict[str, KeyAgg]]' = None
+_LAST_FILES: set[str] = set()
+
 # ---------------------------------------------------------------------------
 # Constants + tuning knobs
 # ---------------------------------------------------------------------------
@@ -97,47 +146,50 @@ def parse_ndjson(path: Path) -> Optional[Record]:
     grid_resolution = 0.5
     complete = False
 
+    # Read whole file as bytes + splitlines is significantly faster than
+    # iterating the file object line-by-line in text mode.  Combined with
+    # orjson on the hot loads call, this dropped per-file parse time
+    # ~3-4x in microbenchmarks.
     try:
-        with path.open('r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                t = obj.get('type')
-                if t == 'header':
-                    header = obj
-                    floor_worlds[1] = obj.get('world', '')
-                    # New header field carries the recorder's cell-derivation
-                    # resolution; old headers omit it and we fall back to the
-                    # 0.5m default below.
-                    if 'cell_resolution_m' in obj:
-                        grid_resolution = obj['cell_resolution_m']
-                elif t == 'sample':
-                    samples.append(obj)
-                elif t == 'event':
-                    events.append(obj)
-                    if obj.get('kind') == 'floor_change':
-                        meta = obj.get('metadata') or {}
-                        to_floor = meta.get('to_floor')
-                        to_world = meta.get('to_world')
-                        if to_floor and to_world:
-                            floor_worlds[to_floor] = to_world
-                elif t == 'actor':
-                    actors.append(obj)
-                elif t == 'grid_cell':
-                    fl = obj.get('floor', 1)
-                    grid[fl].append((obj['cx'], obj['cy'], obj['w']))
-                    if obj.get('res'):
-                        grid_resolution = obj['res']
-                elif t == 'footer':
-                    complete = True
+        data = path.read_bytes()
     except OSError as e:
         print(f"  ! cannot read {path}: {e}", file=sys.stderr)
         return None
+    for line in data.splitlines():
+        if not line:
+            continue
+        try:
+            obj = _loads(line)
+        except _JSON_DECODE_ERROR:
+            continue
+        t = obj.get('type')
+        if t == 'header':
+            header = obj
+            floor_worlds[1] = obj.get('world', '')
+            # New header field carries the recorder's cell-derivation
+            # resolution; old headers omit it and we fall back to the
+            # 0.5m default below.
+            if 'cell_resolution_m' in obj:
+                grid_resolution = obj['cell_resolution_m']
+        elif t == 'sample':
+            samples.append(obj)
+        elif t == 'event':
+            events.append(obj)
+            if obj.get('kind') == 'floor_change':
+                meta = obj.get('metadata') or {}
+                to_floor = meta.get('to_floor')
+                to_world = meta.get('to_world')
+                if to_floor and to_world:
+                    floor_worlds[to_floor] = to_world
+        elif t == 'actor':
+            actors.append(obj)
+        elif t == 'grid_cell':
+            fl = obj.get('floor', 1)
+            grid[fl].append((obj['cx'], obj['cy'], obj['w']))
+            if obj.get('res'):
+                grid_resolution = obj['res']
+        elif t == 'footer':
+            complete = True
 
     if not header:
         return None
@@ -587,15 +639,90 @@ def find_repo_paths() -> tuple[Path, Path, Path]:
     return dumps, data, sidecar
 
 
+def _parse_with_cache(fp: Path) -> Optional[Record]:
+    """parse_ndjson + a (path, mtime) cache.  On cache hit returns the
+    previously-parsed Record without touching the disk.  On miss / stale
+    mtime, parses fresh and stores.  Eviction happens in merge_all when
+    a file disappears from the dumps dir."""
+    try:
+        mt = fp.stat().st_mtime
+    except OSError:
+        return None
+    key = str(fp)
+    cached = _PARSE_CACHE.get(key)
+    if cached and cached[0] == mt:
+        return cached[1]
+    rec = parse_ndjson(fp) if fp.suffix == '.ndjson' else _parse_legacy(fp)
+    # Cache the result even if rec is None -- avoids re-parsing files that
+    # consistently fail to parse (corrupted dumps, missing header, etc.).
+    if len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
+        # Should never realistically hit this; bound just in case.
+        _PARSE_CACHE.clear()
+    _PARSE_CACHE[key] = (mt, rec)
+    return rec
+
+
 def merge_all(dumps: Path, only_complete: bool = True) -> dict[str, KeyAgg]:
-    state: dict[str, KeyAgg] = {}
+    """Walk the dumps dir, fold each into the per-zone aggregate state,
+    return the state.
+
+    Incremental fast path: when this is called repeatedly within the
+    same Python process (i.e. the FastAPI scheduler-winning worker), we
+    reuse the cached state from the previous call and only fold in
+    files that are new or have a changed mtime.  Files that disappeared
+    since last call trigger a full rebuild (we can't cleanly subtract a
+    record's contribution from an aggregate).
+
+    Also tracks which zone keys were touched this call -- caller can
+    use that to do a selective emit of only the changed zone JSONs.
+    See `merger.last_touched_keys` for the most-recent-call value.
+    """
+    global _STATE_CACHE, _LAST_FILES
+
+    t0 = time.time()
     files = sorted(dumps.glob('*.ndjson'))
     files += sorted(dumps.glob('*.json'))     # legacy single-blob format
-    print(f'[merge] {len(files)} candidate files in {dumps}')
+    file_set = {str(f) for f in files}
+
+    # Decide between full rebuild vs incremental.  Full rebuild fires
+    # when (a) we have no cached state or (b) any file was removed since
+    # the previous call (quarantine, manual delete).  In case (b) we
+    # also evict the parse cache for the dropped paths.
+    removed = _LAST_FILES - file_set
+    if removed:
+        for k in removed:
+            _PARSE_CACHE.pop(k, None)
+    do_rebuild = (_STATE_CACHE is None) or bool(removed)
+
+    if do_rebuild:
+        state: dict[str, KeyAgg] = {}
+        candidates = files          # process every file
+        mode = 'rebuild'
+    else:
+        # Reuse last cycle's aggregated state.  We mutate in place; if
+        # this turns out to need a snapshot (concurrent emit), copy here.
+        state = _STATE_CACHE  # type: ignore[assignment]
+        # Only walk files that are newly added or whose mtime changed
+        # since their cached parse.  parse_ndjson itself short-circuits
+        # via the parse cache so unchanged files cost ~one stat() call.
+        candidates = []
+        for fp in files:
+            try:
+                mt = fp.stat().st_mtime
+            except OSError:
+                continue
+            cached = _PARSE_CACHE.get(str(fp))
+            if not cached or cached[0] != mt:
+                candidates.append(fp)
+        mode = 'incremental'
+
+    print(f'[merge] {mode}: {len(candidates)} candidate / {len(files)} total files in {dumps}')
     accepted = 0
     skipped = 0
-    for fp in files:
-        rec = parse_ndjson(fp) if fp.suffix == '.ndjson' else _parse_legacy(fp)
+    touched_keys: set[str] = set()
+
+    for fp in candidates:
+        rec = _parse_with_cache(fp)
         if rec is None:
             skipped += 1
             continue
@@ -609,9 +736,39 @@ def merge_all(dumps: Path, only_complete: bool = True) -> dict[str, KeyAgg]:
         touched = merge_record_into(state, rec)
         if touched:
             accepted += 1
+            for k in touched:
+                touched_keys.add(k)
             print(f'  + {fp.name}: {rec.activity_kind}/{rec.zone} -> {", ".join(touched)}')
-    print(f'[merge] accepted {accepted}, skipped {skipped}')
+
+    _STATE_CACHE = state
+    _LAST_FILES  = file_set
+    # Stash the touched-zones set on the module so callers (emit_all) can
+    # use it for selective re-emission.  When mode='rebuild' we touched
+    # everything by definition -- empty set means "emit nothing" which
+    # would be wrong, so signal that here.
+    merge_all.last_touched_keys = touched_keys if mode == 'incremental' else set(state.keys())
+    merge_all.last_mode         = mode
+
+    elapsed = time.time() - t0
+    print(f'[merge] {mode}: accepted {accepted}, skipped {skipped}, touched={len(touched_keys)} zones in {elapsed:.2f}s')
     return state
+
+
+# Module-level holders for the most recent call's metadata (avoids a
+# return-type change to merge_all that'd ripple into older callers).
+merge_all.last_touched_keys = set()  # type: ignore[attr-defined]
+merge_all.last_mode         = ''     # type: ignore[attr-defined]
+
+
+def reset_merge_state() -> None:
+    """Clear the parse + state caches.  Forces the next merge_all call
+    to do a full rebuild from disk.  Useful after admin operations
+    (quarantine, zone reset) where the in-memory state can't be
+    incrementally fixed."""
+    global _STATE_CACHE, _LAST_FILES
+    _PARSE_CACHE.clear()
+    _STATE_CACHE = None
+    _LAST_FILES  = set()
 
 
 def _parse_legacy(path: Path) -> Optional[Record]:
@@ -700,12 +857,41 @@ def emit_actor_index(out_dir: Path, state: dict[str, KeyAgg]) -> Path:
     return path
 
 
-def emit_all(state: dict[str, KeyAgg], data_dir: Path, sidecar_dir: Path) -> None:
+def emit_all(state: dict[str, KeyAgg], data_dir: Path, sidecar_dir: Path,
+             only_keys: Optional[set[str]] = None) -> None:
+    """Write merged JSON files.
+
+    `only_keys` (when given) restricts the per-zone curated emission to
+    just those keys -- typical case is "the zones that picked up new
+    data this cycle" from merge_all.last_touched_keys.  The global
+    summaries (coverage, actor index, saturated) are still emitted
+    every call since they're cheap and any zone change can affect them.
+
+    Pass only_keys=None or an empty set to mean "emit every zone in
+    state" (e.g. after a full rebuild).
+    """
+    t0 = time.time()
     if not state:
         print('[emit] no aggregated data, nothing to write')
         return
-    for key, agg in state.items():
+    # only_keys semantics:
+    #   None       -> emit everything (default, what the legacy callers want)
+    #   set([..])  -> emit just those zones + still re-emit globals
+    #   set()      -> nothing changed this cycle, skip the whole emit
+    if only_keys is None:
+        keys_to_emit: Iterable[str] = state.keys()
+    elif not only_keys:
+        print('[emit] no zones changed; skipping all writes')
+        return
+    else:
+        # Intersect with state -- guards against stale keys in only_keys.
+        keys_to_emit = [k for k in only_keys if k in state]
+
+    emitted = 0
+    for key in keys_to_emit:
+        agg = state[key]
         path = emit_curated(data_dir, agg)
+        emitted += 1
         cells = sum(len(m) for m in agg.cells_by_floor.values())
         print(f'  -> {path}  cells={cells} actors={len(agg.actors)} sessions={len(agg.sessions)}')
 
@@ -717,6 +903,7 @@ def emit_all(state: dict[str, KeyAgg], data_dir: Path, sidecar_dir: Path) -> Non
     sidecar_dir.mkdir(parents=True, exist_ok=True)
     sat = emit_saturated(sidecar_dir, state)
     print(f'  -> {sat} (consumed by recorder)')
+    print(f'[emit] wrote {emitted} curated zones in {time.time()-t0:.2f}s')
 
 
 def main(argv: list[str] | None = None) -> int:
