@@ -308,6 +308,13 @@ def _get_or_create(state: dict[str, KeyAgg], key: str, key_type: str) -> KeyAgg:
 
 
 def _vote_cell(cell_map: dict[CellKey, CellAgg], cx: int, cy: int, w: int) -> None:
+    # Defensive filter: drop cells within ~5m of world (0,0).  Older
+    # recorder versions wrote bogus probe-target cells around origin
+    # when the host returned near-zero player positions during teleport
+    # transitions.  Real D4 maps live thousands of cell-units from origin
+    # so this rejects garbage without ever clipping legitimate data.
+    if abs(cx) < 10 and abs(cy) < 10:
+        return
     k = (cx, cy)
     if k not in cell_map:
         cell_map[k] = CellAgg()
