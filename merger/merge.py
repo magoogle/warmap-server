@@ -389,8 +389,10 @@ _SKIN_IGNORE_SUBSTR = (
     # Floor pickups -- spawn at random kill positions, consumed-on-pickup.
     #   HealthPot_Dose_Pickup            (type_id 30631106,   sno_id 47186448)
     #   Sorcerer_CracklingEnergy_Pickup  (type_id 1385506706, sno_id 72352155)
+    #   BurningAether                    (type_id 3189278226, sno_id 1234174277)
     'HealthPot_Dose_Pickup',
     'Sorcerer_CracklingEnergy_Pickup',
+    'BurningAether',
 )
 
 
