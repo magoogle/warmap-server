@@ -267,6 +267,98 @@ body:not(.tier-admin) [data-admin-only] { display: none !important; }
     text-align: right;
 }
 
+/* ---- Zone-details collapsible panel (under the header) ----
+   Toggled by #zone-details-toggle.  Holds a small definition-list
+   grid plus inline tables for per-floor + per-actor-kind breakdowns.
+   Sits above the canvas in normal flow (NOT absolute) so a tall
+   panel pushes the canvas down rather than overlapping it. */
+.zone-details-toggle {
+    padding: 0.28rem 0.6rem;
+    font-size: 0.74rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    cursor: pointer;
+}
+.zone-details-toggle .caret {
+    transition: transform 0.15s ease;
+    font-size: 0.85rem;
+    line-height: 1;
+}
+.zone-details-toggle[aria-expanded="true"] .caret {
+    transform: rotate(180deg);
+}
+
+.zone-details {
+    flex: 0 0 auto;
+    margin: 0 0 0.6rem;
+    padding: 0.55rem 0.75rem;
+    background: var(--bg-soft, #161b22);
+    border: 1px solid var(--border, #30363d);
+    border-radius: var(--r-md, 6px);
+    font-size: 0.78rem;
+    color: var(--text-secondary, #c9d1d9);
+    line-height: 1.45;
+}
+/* Two-column grid of label/value pairs.  Wraps on narrow viewports. */
+.zone-details .det-grid {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content 1fr;
+    gap: 0.18rem 0.9rem;
+    margin-bottom: 0.45rem;
+}
+.zone-details .det-grid .k {
+    color: var(--text-muted, #8b949e);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.zone-details .det-grid .v {
+    font-family: Consolas, monospace;
+    font-size: 0.78rem;
+    color: var(--text-primary, #d6dde6);
+    word-break: break-all;
+}
+.zone-details .det-grid .v.warn { color: #f0883e; }
+.zone-details .det-grid .v.ok   { color: #56d364; }
+
+/* Sub-section: per-floor + per-kind breakdowns.  Inline tables so
+   the dropdown stays compact. */
+.zone-details .det-subsection {
+    margin-top: 0.45rem;
+    padding-top: 0.4rem;
+    border-top: 1px dotted var(--border, #30363d);
+}
+.zone-details .det-subsection h4 {
+    margin: 0 0 0.25rem;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted, #8b949e);
+    font-weight: 600;
+}
+.zone-details table.det-table {
+    border-collapse: collapse;
+    font-family: Consolas, monospace;
+    font-size: 0.74rem;
+}
+.zone-details table.det-table th,
+.zone-details table.det-table td {
+    padding: 0.12rem 0.55rem 0.12rem 0;
+    text-align: right;
+    color: var(--text-primary, #d6dde6);
+}
+.zone-details table.det-table th {
+    color: var(--text-muted, #8b949e);
+    font-weight: 500;
+    text-align: right;
+    border-bottom: 1px solid var(--border, #30363d);
+}
+.zone-details table.det-table td:first-child,
+.zone-details table.det-table th:first-child {
+    text-align: left;
+}
+
 .canvas-wrap {
     flex: 1 1 0;
     min-height: 0;          /* without this, canvas pushes siblings off-screen */
@@ -584,10 +676,21 @@ body:not(.tier-admin) [data-admin-only] { display: none !important; }
 /* ---- Actor info panel ---- */
 .actor-panel {
     position: absolute;
+    /* Sit in the TOP-LEFT corner of the canvas viewport.  The
+       canvas-controls (zoom +/-/fit + zoom-%) live at top-right;
+       previously the actor-panel was *also* at top-right with no
+       z-index management and hid behind the controls.  Moving it
+       to the opposite corner gives both widgets unambiguous space
+       and stops the user from having to dismiss one to use the
+       other. */
     top: 12px;
-    right: 12px;
+    left: 12px;
     width: 290px;
     max-height: calc(100% - 24px);
+    /* Above the canvas (z=auto) and the canvas-controls (z=5) just
+       in case they ever re-collide on a narrow viewport, but well
+       below the admin modal (z=100). */
+    z-index: 6;
     background: #161b22;
     border: 1px solid #30363d;
     border-radius: 6px;

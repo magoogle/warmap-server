@@ -106,11 +106,26 @@
                 <header class="zone-header">
                     <h2 id="zone-title"></h2>
                     <div id="zone-meta" class="zone-meta"></div>
+                    <!-- Toggle for the rich-detail panel below the header.
+                         Collapsed by default to keep the canvas tall on
+                         small screens; the headline meta line above
+                         already covers the most-asked-for stats. -->
+                    <button id="zone-details-toggle" class="hdr-btn zone-details-toggle"
+                            type="button" aria-expanded="false"
+                            title="Show full zone metadata">
+                        Details <span class="caret">&#x25BE;</span>
+                    </button>
                     <button id="zone-download" class="hdr-btn zone-download-btn"
                             title="Download this zone's merged JSON file" hidden>
                         Download
                     </button>
                 </header>
+                <!-- Rich-details panel.  Populated by renderZoneDetails()
+                     in viewer.js whenever currentData changes; shown only
+                     when the user clicks the toggle.  Sits between the
+                     header and the canvas so it doesn't overlap the
+                     floating canvas controls. -->
+                <div id="zone-details" class="zone-details" hidden></div>
                 <div class="canvas-wrap">
                     <canvas id="zone-canvas" width="1024" height="1024"></canvas>
                     <div id="hover-tooltip" class="hover-tooltip" hidden></div>

@@ -27,6 +27,8 @@ const D = {
     zoneView:     document.getElementById('zone-view'),
     zoneTitle:    document.getElementById('zone-title'),
     zoneMeta:     document.getElementById('zone-meta'),
+    zoneDetails:        document.getElementById('zone-details'),
+    zoneDetailsToggle:  document.getElementById('zone-details-toggle'),
     canvas:       document.getElementById('zone-canvas'),
     tooltip:      document.getElementById('hover-tooltip'),
     floorCtl:     document.getElementById('floor-controls'),
@@ -869,6 +871,114 @@ function renderMeta() {
     D.zoneMeta.innerHTML =
         `${cells.toLocaleString()} cells · ${actors} actors · ${sess} session${sess === 1 ? '' : 's'}${sat} · ` +
         `<span class="muted">merged ${merged}</span>`;
+    // Re-populate the (possibly hidden) details panel so it's always
+    // fresh -- cheap, runs only when a zone is loaded or floor changes.
+    renderZoneDetails();
+}
+
+// ---- Rich zone-details panel ----------------------------------------------
+// Surfaced via the "Details v" toggle next to the zone header.  Pulls every
+// non-bulky field from the merged JSON and renders a compact two-column
+// grid plus inline breakdowns for per-floor and per-actor-kind counts.
+// Updated whenever currentData changes or the user changes floors.
+function renderZoneDetails() {
+    if (!D.zoneDetails) return;
+    const z = S.currentData;
+    if (!z) { D.zoneDetails.innerHTML = ''; return; }
+
+    const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    const fmtNum = n => Number(n || 0).toLocaleString();
+    const fmtTs  = ts => ts ? new Date(ts * 1000).toLocaleString() : '--';
+
+    // ---- Per-floor breakdown (cells walkable + actors) ----
+    const floors = z.grid?.floors || {};
+    const actorsAll = z.actors || [];
+    const floorIds = Object.keys(floors).sort((a, b) => Number(a) - Number(b));
+    const floorRows = floorIds.map(fid => {
+        const cells   = (floors[fid] || []).length;
+        const actorsF = actorsAll.filter(a => String(a.floor) === fid).length;
+        const cur = String(S.currentFloor) === fid ? ' (active)' : '';
+        return `<tr><td>floor ${esc(fid)}${cur}</td>` +
+               `<td>${fmtNum(cells)}</td><td>${fmtNum(actorsF)}</td></tr>`;
+    }).join('');
+
+    // ---- Per-kind actor breakdown (active floor only -- matches what the
+    // viewer is currently rendering) ----
+    const kindCounts = {};
+    for (const a of actorsAll) {
+        if (a.floor != null && String(a.floor) !== String(S.currentFloor)) continue;
+        const k = a.kind || '?';
+        kindCounts[k] = (kindCounts[k] || 0) + 1;
+    }
+    const kindRows = Object.entries(kindCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `<tr><td>${esc(k)}</td><td>${fmtNum(n)}</td></tr>`).join('');
+
+    // ---- Headline grid (2-col x 2-col = 4 cells per row) ----
+    const bbox = z.grid?.bbox;
+    const bboxStr = (Array.isArray(bbox) && bbox.length === 4)
+        ? `${bbox[0].toFixed(1)} -> ${bbox[2].toFixed(1)} x ` +
+          `${bbox[1].toFixed(1)} -> ${bbox[3].toFixed(1)}`
+        : '--';
+    const extentStr = (Array.isArray(bbox) && bbox.length === 4)
+        ? `${(bbox[2] - bbox[0]).toFixed(1)} x ${(bbox[3] - bbox[1]).toFixed(1)} m`
+        : '--';
+    const sat = z.saturated;
+    const satReason = z.saturation_info?.reason || '';
+    const satClass = sat ? 'ok' : (satReason ? 'warn' : '');
+    const satText  = sat ? 'yes' : (satReason ? `no (${esc(satReason)})` : 'no');
+    const acts = (z.activity_kinds && z.activity_kinds.length)
+        ? z.activity_kinds.map(esc).join(', ') : '--';
+
+    const totalActors = actorsAll.length;
+    const totalCells  = floorIds.reduce((acc, fid) => acc + (floors[fid] || []).length, 0);
+
+    D.zoneDetails.innerHTML = `
+      <div class="det-grid">
+        <span class="k">key</span>           <span class="v">${esc(z.key || '--')}</span>
+        <span class="k">type</span>          <span class="v">${esc(z.key_type || '--')}</span>
+        <span class="k">activity</span>      <span class="v">${acts}</span>
+        <span class="k">schema</span>        <span class="v">v${esc(z.schema_version ?? '--')}</span>
+        <span class="k">sessions</span>      <span class="v">${fmtNum(z.sessions_merged)}</span>
+        <span class="k">saturated</span>     <span class="v ${satClass}">${satText}</span>
+        <span class="k">merged</span>        <span class="v">${fmtTs(z.merged_at)}</span>
+        <span class="k">resolution</span>    <span class="v">${z.grid?.resolution ?? '--'} m/cell</span>
+        <span class="k">extent</span>        <span class="v">${extentStr}</span>
+        <span class="k">bbox</span>          <span class="v">${bboxStr}</span>
+        <span class="k">floors</span>        <span class="v">${floorIds.length}</span>
+        <span class="k">total cells</span>   <span class="v">${fmtNum(totalCells)}</span>
+        <span class="k">total actors</span>  <span class="v">${fmtNum(totalActors)}</span>
+        <span class="k">cur floor</span>     <span class="v">${esc(S.currentFloor ?? '--')}</span>
+      </div>
+      ${floorRows ? `
+      <div class="det-subsection">
+        <h4>per-floor</h4>
+        <table class="det-table">
+          <thead><tr><th>floor</th><th>cells</th><th>actors</th></tr></thead>
+          <tbody>${floorRows}</tbody>
+        </table>
+      </div>` : ''}
+      ${kindRows ? `
+      <div class="det-subsection">
+        <h4>actors on floor ${esc(S.currentFloor ?? '?')} by kind</h4>
+        <table class="det-table">
+          <thead><tr><th>kind</th><th>count</th></tr></thead>
+          <tbody>${kindRows}</tbody>
+        </table>
+      </div>` : ''}
+    `;
+}
+
+// Toggle handler: flip aria-expanded + show/hide the panel.  Wired once
+// at module load; works whether or not a zone is currently loaded.
+if (D.zoneDetailsToggle) {
+    D.zoneDetailsToggle.addEventListener('click', () => {
+        const expanded = D.zoneDetailsToggle.getAttribute('aria-expanded') === 'true';
+        const next = !expanded;
+        D.zoneDetailsToggle.setAttribute('aria-expanded', String(next));
+        D.zoneDetails.hidden = !next;
+        if (next) renderZoneDetails();   // populate-on-open in case state changed
+    });
 }
 
 D.floorSelect.addEventListener('change', e => {
