@@ -342,75 +342,56 @@ function adminFetch(path, init) {
     return fetch(path, init);
 }
 
-// ---- API key field (top of sidebar) -------------------------------------
-// Compact paste-and-go.  Press Enter (or just paste -- we auto-validate
-// on blur too) and we hit /zones with the proposed key; on success we
-// save to localStorage and re-fetch everything.  The little dot left of
-// the input goes green when the key is good, red when it's bad.
-const _apikeyRow   = document.getElementById('apikey-row');
-const _apikeyInput = document.getElementById('apikey-input');
-
-function setApikeyState(state) {   // 'good' | 'bad' | ''
-    if (!_apikeyRow) return;
-    _apikeyRow.classList.remove('good', 'bad');
-    if (state) _apikeyRow.classList.add(state);
+// ---- Sign-in overlay -----------------------------------------------------
+// Centered card, shown on boot when no API key is in localStorage and
+// again whenever a fetch returns 401.  Single input + Continue button.
+function showSigninOverlay(errorMsg) {
+    const o = document.getElementById('signin-overlay');
+    const inp = document.getElementById('signin-input');
+    const err = document.getElementById('signin-error');
+    if (!o) return;
+    if (err) err.textContent = errorMsg || '';
+    o.hidden = false;
+    setTimeout(() => inp && inp.focus(), 50);
 }
-async function tryApikey(rawKey, opts) {
-    const trimmed = (rawKey || '').trim();
-    if (!trimmed) { setApikeyState(''); return false; }
+function hideSigninOverlay() {
+    const o = document.getElementById('signin-overlay');
+    if (o) o.hidden = true;
+}
+async function attemptSignin(key) {
+    const trimmed = (key || '').trim();
+    if (!trimmed) { showSigninOverlay('paste a key first'); return false; }
     try {
-        // Hit a gated endpoint that returns a small body (cheap).
+        // Hit /zones (gated) to validate; cheap and uses the same code
+        // path the rest of the viewer takes for read endpoints.
         const r = await fetch('/zones', {
             cache: 'no-store',
             headers: { 'X-WarMap-Key': trimmed },
         });
-        if (r.status === 401) { setApikeyState('bad'); return false; }
-        if (!r.ok)            { setApikeyState('bad'); return false; }
+        if (r.status === 401) { showSigninOverlay('rejected'); return false; }
+        if (!r.ok)            { showSigninOverlay(`HTTP ${r.status}`); return false; }
     } catch (e) {
-        setApikeyState('bad');
+        showSigninOverlay('network error');
         return false;
     }
     S.adminKey = trimmed;
     localStorage.setItem('warmap_admin_key', trimmed);
-    setApikeyState('good');
-    if (!opts || !opts.skipRefresh) {
-        refreshStatus();
-        refreshZoneList();
-        refreshUploaders();
-    }
+    hideSigninOverlay();
+    refreshStatus();
+    refreshZoneList();
+    refreshUploaders();
     return true;
 }
-// Pre-populate the field if we already have a key saved, and validate.
-if (_apikeyInput && S.adminKey) {
-    _apikeyInput.value = S.adminKey;
-    // Validate on boot, but don't trigger a duplicate refresh -- init()
-    // already fetches.  Just set the dot color.
-    tryApikey(S.adminKey, { skipRefresh: true });
-}
-// Submit on Enter.
-_apikeyInput?.addEventListener('keydown', (e) => {
+document.getElementById('signin-btn')?.addEventListener('click', () => {
+    const inp = document.getElementById('signin-input');
+    if (inp) attemptSignin(inp.value);
+});
+document.getElementById('signin-input')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
         e.preventDefault();
-        tryApikey(e.target.value);
+        attemptSignin(e.target.value);
     }
 });
-// Auto-validate on paste (next tick so the value is settled).
-_apikeyInput?.addEventListener('paste', () => {
-    setTimeout(() => tryApikey(_apikeyInput.value), 0);
-});
-// Re-validate on blur (covers manual typing).
-_apikeyInput?.addEventListener('blur', () => {
-    if (_apikeyInput.value && _apikeyInput.value !== S.adminKey) {
-        tryApikey(_apikeyInput.value);
-    }
-});
-
-// Compatibility shims: anywhere in older code that called the overlay
-// helpers, redirect to flagging the apikey row in red.  The paste field
-// is always visible so there's nothing to "show."
-function showSigninOverlay(/* errorMsg */) { setApikeyState('bad'); _apikeyInput?.focus(); }
-function hideSigninOverlay() { setApikeyState('good'); }
-async function attemptSignin(key) { return tryApikey(key); }
 
 // ---- Header live stats ---------------------------------------------------
 // Shorter, more-glanceable replacement for the single status text node.

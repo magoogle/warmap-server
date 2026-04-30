@@ -36,17 +36,19 @@
         </div>
     </header>
 
+    <!-- Centered sign-in card.  Shown on boot when no API key is in
+         localStorage, and again if a fetch returns 401. -->
+    <div id="signin-overlay" hidden>
+        <div class="signin-card">
+            <h2>Enter API Key</h2>
+            <input type="password" id="signin-input" autocomplete="off" />
+            <div class="signin-error" id="signin-error"></div>
+            <button id="signin-btn" type="button">Continue</button>
+        </div>
+    </div>
 
     <main>
         <aside id="sidebar">
-            <!-- API key paste field.  Saves to localStorage; required for
-                 every gated endpoint.  Tiny indicator dot turns green
-                 when the saved key validates against /status. -->
-            <div class="apikey-row" id="apikey-row">
-                <span class="apikey-dot" id="apikey-dot"></span>
-                <input type="password" id="apikey-input" placeholder="paste API key" autocomplete="off" />
-            </div>
-
             <div class="tabs">
                 <button class="tab active" data-tab="zones">Zones</button>
                 <button class="tab"        data-tab="layers">Layers</button>
