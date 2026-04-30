@@ -27,6 +27,7 @@ without needing the secret -- there's nothing private in the merged data.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -36,6 +37,16 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
+
+# fcntl is unix-only; the deployment target is Docker on Linux so this is
+# always available in production.  We fall back to a no-op shim on Windows
+# so local dev imports still work (single-worker dev doesn't need cross-
+# process locking anyway).
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
@@ -189,8 +200,17 @@ app = FastAPI(title='WarMap Upload Server', version='0.1')
 # in parallel -- this dropped the server CPU from 100% pegged to ~10%.)
 
 
-# Global state for the background merger
+# Global state for the background merger.
+#
+# In-process lock: prevents two threads in the same worker from racing
+# (e.g. /merge POST during the periodic loop's tick).
+# Cross-process lock: a flock on a marker file under ROOT, used so that
+# multiple uvicorn workers can't fire concurrent merges over the same
+# DUMPS_DIR / DATA_DIR.  See _run_merge below.
 _merge_lock = threading.Lock()
+_MERGE_LOCK_PATH = ROOT / 'merge.lock'
+_SCHEDULER_LOCK_PATH = ROOT / 'merge_scheduler.lock'
+
 _last_merge: dict = {
     'started_at': None,
     'finished_at': None,
@@ -199,6 +219,41 @@ _last_merge: dict = {
     'skipped': 0,
     'error': None,
 }
+
+
+@contextlib.contextmanager
+def _file_lock(path: Path, blocking: bool = False):
+    """Cross-process advisory lock via fcntl.flock.  Yields the open file
+    handle on acquire, or None if non-blocking and another process holds
+    it.  No-op (always yields a sentinel) on platforms without fcntl --
+    fine for local dev where only one process is running.
+    """
+    if not _HAS_FCNTL:
+        yield True
+        return
+    f = open(path, 'a+')
+    try:
+        flags = fcntl.LOCK_EX
+        if not blocking:
+            flags |= fcntl.LOCK_NB
+        try:
+            fcntl.flock(f.fileno(), flags)
+        except BlockingIOError:
+            f.close()
+            yield None
+            return
+        try:
+            yield f
+        finally:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        try:
+            f.close()
+        except Exception:
+            pass
 
 
 # ----- Helpers -------------------------------------------------------------
@@ -296,31 +351,42 @@ def _conditional_file_response(path: Path, request: Request, media_type: str,
 
 def _run_merge() -> dict:
     """Run the merger against DUMPS_DIR -> DATA_DIR.  Also refreshes the
-    SQLite index (sessions table + actors table) from the same scan."""
-    if not _merge_lock.acquire(blocking=False):
-        return {'skipped': True, 'reason': 'already running'}
-    try:
-        _last_merge['started_at'] = time.time()
-        _last_merge['error'] = None
-        try:
-            merge = _import_merger()
-            state = merge.merge_all(DUMPS_DIR, only_complete=False)
-            merge.emit_all(state, DATA_DIR, SIDECAR)
-            accepted = sum(len(agg.sessions) for agg in state.values())
-            _last_merge['accepted'] = accepted
-            _last_merge['skipped']  = 0
+    SQLite index (sessions table + actors table) from the same scan.
 
-            # Refresh DB index off the same set of files the merger just read.
-            # Cheap because we're only re-summarising headers + last samples.
-            _refresh_db_from_disk(state)
-        except Exception as e:
-            _last_merge['error'] = str(e)
-            return {'ok': False, 'error': str(e)}
-        finally:
-            _last_merge['finished_at'] = time.time()
-            _last_merge['duration_s'] = (
-                _last_merge['finished_at'] - _last_merge['started_at'])
-        return {'ok': True, 'last_merge': _last_merge.copy()}
+    Locking is two-layer:
+      * In-process threading.Lock: stops two threads in the SAME worker
+        from racing (e.g. POST /merge while the scheduler tick fires).
+      * Cross-process fcntl flock: stops two uvicorn WORKERS from running
+        the merger simultaneously over the same DUMPS_DIR / DATA_DIR.
+    Both are non-blocking; if either is held we report skipped and return.
+    """
+    if not _merge_lock.acquire(blocking=False):
+        return {'skipped': True, 'reason': 'already running (in-process)'}
+    try:
+        with _file_lock(_MERGE_LOCK_PATH, blocking=False) as lk:
+            if lk is None:
+                return {'skipped': True, 'reason': 'already running (other worker)'}
+            _last_merge['started_at'] = time.time()
+            _last_merge['error'] = None
+            try:
+                merge = _import_merger()
+                state = merge.merge_all(DUMPS_DIR, only_complete=False)
+                merge.emit_all(state, DATA_DIR, SIDECAR)
+                accepted = sum(len(agg.sessions) for agg in state.values())
+                _last_merge['accepted'] = accepted
+                _last_merge['skipped']  = 0
+
+                # Refresh DB index off the same set of files the merger just read.
+                # Cheap because we're only re-summarising headers + last samples.
+                _refresh_db_from_disk(state)
+            except Exception as e:
+                _last_merge['error'] = str(e)
+                return {'ok': False, 'error': str(e)}
+            finally:
+                _last_merge['finished_at'] = time.time()
+                _last_merge['duration_s'] = (
+                    _last_merge['finished_at'] - _last_merge['started_at'])
+            return {'ok': True, 'last_merge': _last_merge.copy()}
     finally:
         _merge_lock.release()
 
@@ -374,11 +440,35 @@ def _refresh_db_from_disk(merge_state: dict) -> None:
 
 # ----- Background merger loop ---------------------------------------------
 async def _merge_periodically(interval_s: int = 300):
-    """Re-run the merger every interval_s seconds while the server is alive."""
+    """Re-run the merger every interval_s seconds while the server is alive.
+
+    Multi-worker safety: at most ONE worker runs this loop.  We try to grab
+    an exclusive flock on _SCHEDULER_LOCK_PATH non-blocking; the worker
+    that wins holds it for the lifetime of the process.  The losers
+    return immediately.  If the winning worker crashes, its lock is
+    released by the kernel and the next merge cycle a survivor will pick
+    it up on the following startup (or whenever the supervisor restarts
+    it).  Without this gate, N workers would each fire the merge every
+    interval_s -> N concurrent merge attempts, all but one rejected by
+    the per-merge flock but still spamming the logs.
+    """
+    if _HAS_FCNTL:
+        f = open(_SCHEDULER_LOCK_PATH, 'a+')
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            f.close()
+            print(f'[scheduler] another worker holds the scheduler lock; standing down (pid={os.getpid()})')
+            return
+        # Hold the file for the lifetime of this task.  Reference kept on
+        # the function via a closure-attached attr so the GC doesn't close
+        # the fd from under us.
+        _merge_periodically._lock_handle = f  # type: ignore[attr-defined]
+        print(f'[scheduler] running periodic merge every {interval_s}s (pid={os.getpid()})')
+
     while True:
         try:
             await asyncio.sleep(interval_s)
-            print(f'[scheduler] running periodic merge')
             _run_merge()
         except Exception as e:
             print(f'[scheduler] error: {e}', file=sys.stderr)
@@ -387,6 +477,8 @@ async def _merge_periodically(interval_s: int = 300):
 @app.on_event('startup')
 async def on_startup():
     # Initial merge so clients can pull immediately if any data exists.
+    # _run_merge is itself flock-gated, so multiple workers all firing this
+    # at startup is safe -- only the first one through actually merges.
     threading.Thread(target=_run_merge, daemon=True).start()
     asyncio.create_task(_merge_periodically(interval_s=int(
         os.getenv('WARMAP_MERGE_INTERVAL_S', '300'))))

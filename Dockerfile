@@ -26,4 +26,9 @@ ENV WARMAP_ROOT=/data
 RUN mkdir -p /data/dumps /data/data/zones /data/sidecar /data/logs
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# WARMAP_WORKERS controls uvicorn worker count.  Default 4 — sized for a
+# small VPS; bump for bigger boxes.  The merger schedule is gated to a
+# single worker via a file lock (see app/main.py _merge_periodically),
+# so scaling workers does not multiply merge runs.
+ENV WARMAP_WORKERS=4
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WARMAP_WORKERS}"]
