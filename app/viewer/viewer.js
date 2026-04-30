@@ -821,8 +821,38 @@ window.addEventListener('mousemove', e => {
 
 D.canvas.addEventListener('wheel', e => {
     e.preventDefault();
-    const f = e.deltaY > 0 ? 0.9 : 1.1;
-    S.view.scale = Math.max(0.1, Math.min(80, S.view.scale * f));
+    // Zoom toward the cursor: keep whatever world-point sits under the
+    // mouse fixed on screen as the scale changes.
+    //
+    // The render pipeline composes scale as `scale = fitScale * S.view.scale`
+    // and centers the bbox via:
+    //   screen_x = w/2 + scale * (world_x - bbox.midx) + panX
+    //   screen_y = h/2 + scale * (bbox.midy_inv - world_y) - panY     (Y flipped)
+    //
+    // Holding (world_x, world_y) under (mx, my) constant before and after
+    // a scale-by-R change yields:
+    //   newPanX = R * oldPanX - (R - 1) * (mx - w/2)
+    //   newPanY = R * oldPanY + (R - 1) * (my - h/2)
+    //
+    // Note the sign flip on Y: panY accumulates inverted in the transform
+    // (see mousemove drag handler: panY -= dy*sy on a downward drag).
+    const rect = D.canvas.getBoundingClientRect();
+    // Match the drag handler's scaling: clientX/Y are CSS px but the
+    // canvas backing store is D.canvas.width/.height pixels.
+    const sx = D.canvas.width  / rect.width;
+    const sy = D.canvas.height / rect.height;
+    const mx = (e.clientX - rect.left) * sx;
+    const my = (e.clientY - rect.top)  * sy;
+    const w  = D.canvas.width;
+    const h  = D.canvas.height;
+    const f  = e.deltaY > 0 ? 0.9 : 1.1;
+    const oldScale = S.view.scale;
+    const newScale = Math.max(0.1, Math.min(80, oldScale * f));
+    if (newScale === oldScale) { return; }     // hit a clamp; nothing to do
+    const r = newScale / oldScale;
+    S.view.panX = r * S.view.panX - (r - 1) * (mx - w / 2);
+    S.view.panY = r * S.view.panY + (r - 1) * (my - h / 2);
+    S.view.scale = newScale;
     render();
 }, { passive: false });
 
