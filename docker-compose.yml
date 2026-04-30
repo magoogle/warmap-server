@@ -1,0 +1,36 @@
+services:
+  warmap-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: warmap-server:latest
+    container_name: warmap-server
+    restart: unless-stopped
+
+    # 30100 = public upload + read API (auth required for writes)
+    # 30101 = same app, exposed for the live viewer; UFW + cloud firewall
+    #         restrict this port to the operator's IP, so the viewer
+    #         doesn't need its own auth.
+    ports:
+      - "30100:8000"
+      - "30101:8000"
+
+    environment:
+      WARMAP_API_KEY:           ${WARMAP_API_KEY:?missing WARMAP_API_KEY}
+      # Re-merge every 60s so the live viewer reflects in-progress sessions.
+      # The merger handles ~10 sessions in ~5s so this is comfortable.
+      WARMAP_MERGE_INTERVAL_S: "60"
+      WARMAP_ROOT:             "/data"
+
+    volumes:
+      - warmap-data:/data
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  warmap-data:
+    name: warmap-data

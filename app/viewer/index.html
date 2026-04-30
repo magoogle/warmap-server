@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WarMap Live</title>
+    <link rel="stylesheet" href="viewer.css" />
+</head>
+<body>
+    <header>
+        <h1>WarMap <span class="version">live</span></h1>
+        <div class="header-meta">
+            <span id="status-text" class="muted">connecting...</span>
+            <label class="auto-toggle">
+                <input type="checkbox" id="auto-refresh" checked />
+                Auto-refresh
+            </label>
+        </div>
+    </header>
+
+    <main>
+        <aside id="sidebar">
+            <h2>Zones <span id="zone-count" class="muted"></span></h2>
+            <ul id="zone-list" class="zone-list"></ul>
+        </aside>
+
+        <section id="content">
+            <div id="empty-state" class="empty-state">
+                <p>Pick a zone from the sidebar to see its merged map.</p>
+            </div>
+            <div id="zone-view" hidden>
+                <header class="zone-header">
+                    <h2 id="zone-title"></h2>
+                    <div id="zone-meta" class="zone-meta"></div>
+                </header>
+                <div class="canvas-wrap">
+                    <canvas id="zone-canvas" width="1024" height="1024"></canvas>
+                    <div id="hover-tooltip" class="hover-tooltip" hidden></div>
+                    <aside id="actor-panel" class="actor-panel" hidden>
+                        <div class="actor-panel-header">
+                            <span>Actor</span>
+                            <button id="actor-panel-close" title="Clear selection">x</button>
+                        </div>
+                        <div id="actor-panel-body"></div>
+                    </aside>
+                </div>
+                <div class="floor-controls" id="floor-controls" hidden>
+                    Floor:
+                    <select id="floor-select"></select>
+                </div>
+                <div class="legend">
+                    <span class="legend-item"><span class="swatch walkable"></span>walkable</span>
+                    <span class="legend-item"><span class="swatch blocked"></span>blocked</span>
+                    <span class="legend-item"><span class="diamond"></span>actor (click for info)</span>
+                    <span class="legend-item muted">drag = pan · scroll = zoom · click marker = inspect</span>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="viewer.js"></script>
+</body>
+</html>
