@@ -389,13 +389,21 @@ def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
         agg.activity_kinds.add(rec.activity_kind)
         agg.sessions.add(rec.session_id)
         agg.grid_resolution = rec.grid_resolution
-        # Zone-level worlds: one entry for static zones (DGN, town,
-        # helltide, overworld) but multi-floor zones (undercity) can
-        # legitimately have several -- e.g. UC_BugCave + UC_BugCave_Boss.
+        # Top-level worlds is the union of (header world) + (every per-
+        # floor world we observed via floor_change events).  The header
+        # world alone is misleading for multi-floor zones (undercity
+        # drops you into floor 1's world; floors 2+ are different
+        # worlds reached only mid-session).  Aggregating both lets the
+        # viewer's "worlds:" row show e.g. UC_Ziggurat_01,
+        # UC_Ziggurat_02, UC_Ziggurat_03 rather than just the entrance.
         if rec.world:
             agg.worlds.add(rec.world)
         if rec.world_id:
             agg.world_ids.add(rec.world_id)
+        for w in rec.floor_worlds.values():
+            if w: agg.worlds.add(w)
+        for wid in rec.floor_world_ids.values():
+            if wid: agg.world_ids.add(wid)
         # Per-floor meta: prefer the floor-change-event-tracked maps
         # (they cover every floor visited mid-session) and fall back to
         # the header's zone-level world+world_id for floors that were
