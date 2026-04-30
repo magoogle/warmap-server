@@ -569,9 +569,28 @@ async def on_startup():
 # renders a live map.  Intended to be exposed only on a separate firewall-
 # locked port (the public 30100 just keeps serving the existing endpoints
 # without the viewer UI).
+#
+# Cache policy: browsers + Cloudflare get told "no-cache, must-revalidate"
+# so a UI deploy is visible immediately to anyone hitting the viewer --
+# without this, CF's default 4-hour TTL on .css/.js means a site that's
+# been viewed in the past hour keeps the stale assets even after we deploy.
+# The actor catalog endpoints (/zones/{key} et al.) keep their own
+# ETag-based caching since they update on a 60s server cadence anyway.
+class _NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        try:
+            resp.headers['Cache-Control'] = 'no-cache, must-revalidate, max-age=0'
+            resp.headers['Pragma']        = 'no-cache'
+            resp.headers['Expires']       = '0'
+        except Exception:
+            pass
+        return resp
+
+
 _VIEWER_DIR = Path(__file__).resolve().parent / 'viewer'
 if _VIEWER_DIR.exists():
-    app.mount('/viewer', StaticFiles(directory=str(_VIEWER_DIR), html=True),
+    app.mount('/viewer', _NoCacheStaticFiles(directory=str(_VIEWER_DIR), html=True),
               name='viewer')
 
 
