@@ -24,10 +24,16 @@ services:
 
     environment:
       WARMAP_API_KEY:           ${WARMAP_API_KEY:?missing WARMAP_API_KEY}
-      # Re-merge every 60s so the live viewer reflects in-progress sessions.
-      # The merger handles ~10 sessions in ~5s so this is comfortable.
-      WARMAP_MERGE_INTERVAL_S: "60"
+      # Re-merge every 30s.  On the on-prem 16-core / 30 GB box this is
+      # cheap (full set of dumps fits in RAM page cache after the first
+      # cycle) and gives the live viewer near-real-time updates as
+      # friends play.  Bump to 60+ if you ever migrate back to a small VPS.
+      WARMAP_MERGE_INTERVAL_S: "30"
       WARMAP_ROOT:             "/data"
+      # Use the on-prem hardware properly.  16 cores -> 12 uvicorn
+      # workers (leave a few for the OS / merger / docker-proxy).  Box
+      # has 30 GB RAM so worker memory ceiling is never the constraint.
+      WARMAP_WORKERS:          "12"
 
     volumes:
       - warmap-data:/data

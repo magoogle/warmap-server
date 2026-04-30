@@ -4,13 +4,30 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WarMap Live</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
     <link rel="stylesheet" href="viewer.css" />
 </head>
 <body>
     <header>
         <h1>WarMap <span class="version">live</span></h1>
+        <div class="header-stats" id="header-stats">
+            <div class="header-stat" id="stat-dumps">
+                <span class="v" id="stat-dumps-v">--</span>
+                <span class="l">dumps</span>
+            </div>
+            <div class="header-stat" id="stat-zones">
+                <span class="v" id="stat-zones-v">--</span>
+                <span class="l">zones</span>
+            </div>
+            <div class="header-stat" id="stat-merge">
+                <span class="v" id="stat-merge-v">--</span>
+                <span class="l">last merge</span>
+            </div>
+        </div>
         <div class="header-meta">
-            <span id="status-text" class="muted">connecting...</span>
+            <span id="status-text" class="muted" hidden>connecting...</span>
             <label class="auto-toggle">
                 <input type="checkbox" id="auto-refresh" checked />
                 Auto-refresh
@@ -18,6 +35,24 @@
             <button id="admin-btn" class="hdr-btn" title="Admin: manage keys / quarantine">Admin</button>
         </div>
     </header>
+
+    <!-- Sign-in overlay: shown on boot when no admin key is in
+         localStorage, and again if a fetch returns 401.  Replaces the
+         old "stuck on connecting..." silent failure. -->
+    <div id="signin-overlay" hidden>
+        <div class="signin-card">
+            <h2>WarMap</h2>
+            <p class="signin-sub">Paste your API key to continue.<br/>Operator? Use the master admin key.</p>
+            <input type="password" id="signin-input" placeholder="64-character hex key" autocomplete="off" />
+            <div class="signin-error" id="signin-error"></div>
+            <button id="signin-btn" type="button">Sign in</button>
+            <div class="signin-hint">
+                Your key is saved to <code>localStorage</code> on this domain only.
+                It never leaves your browser except as the <code>X-WarMap-Key</code>
+                request header on calls to this server.
+            </div>
+        </div>
+    </div>
 
     <main>
         <aside id="sidebar">
@@ -73,6 +108,18 @@
                 <div class="canvas-wrap">
                     <canvas id="zone-canvas" width="1024" height="1024"></canvas>
                     <div id="hover-tooltip" class="hover-tooltip" hidden></div>
+                    <!-- Floating canvas controls: zoom in/out + fit, with
+                         a live zoom-% readout below.  Replaces the
+                         "drag = pan / scroll = zoom" hint as the primary
+                         UI for navigation. -->
+                    <div class="canvas-controls">
+                        <div class="ctrl-group">
+                            <button class="ctrl-btn" id="canvas-zoom-in"  title="Zoom in (or scroll up)">+</button>
+                            <button class="ctrl-btn" id="canvas-zoom-out" title="Zoom out (or scroll down)">-</button>
+                            <button class="ctrl-btn" id="canvas-fit"      title="Fit zone to view (F)">&#x2922;</button>
+                        </div>
+                        <div class="zoom-pct" id="canvas-zoom-pct">100%</div>
+                    </div>
                     <aside id="actor-panel" class="actor-panel" hidden>
                         <div class="actor-panel-header">
                             <span>Actor</span>

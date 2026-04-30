@@ -779,3 +779,203 @@ button {
     padding: 1rem;
     overflow-y: auto;
 }
+
+/* ---------------------------------------------------------------------
+   Sign-in overlay -- shown when the viewer can't auth (no admin key in
+   localStorage, or the saved key got rejected).  Centered card replaces
+   the buried "Admin" button flow; user pastes their key, hits Enter,
+   localStorage saves, and we reload the data.
+--------------------------------------------------------------------- */
+#signin-overlay {
+    position: fixed;
+    inset: 0;
+    background:
+        radial-gradient(ellipse 80% 60% at 50% 0%, rgba(139, 109, 255, 0.18), transparent 70%),
+        rgba(7, 9, 13, 0.92);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    animation: fadeIn 0.2s ease-out;
+}
+#signin-overlay[hidden] { display: none; }
+.signin-card {
+    width: min(420px, calc(100vw - 2rem));
+    background: var(--bg-elev-1);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-lg), 0 0 0 1px var(--accent-edge);
+    padding: 1.6rem 1.6rem 1.4rem;
+    text-align: center;
+}
+.signin-card h2 {
+    margin: 0 0 0.4rem;
+    font-size: 1.25rem;
+    background: linear-gradient(135deg, var(--text), var(--accent));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+.signin-card .signin-sub {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    margin: 0 0 1.2rem;
+    line-height: 1.5;
+}
+.signin-card input {
+    width: 100%;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    color: var(--text);
+    padding: 0.65rem 0.8rem;
+    font-family: 'Consolas', 'SF Mono', monospace;
+    font-size: 0.85rem;
+    margin-bottom: 0.6rem;
+    transition: border-color 0.12s, box-shadow 0.12s;
+}
+.signin-card input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.signin-card button {
+    width: 100%;
+    background: linear-gradient(135deg, var(--accent) 0%, #6c4dee 100%);
+    color: #fff;
+    border: none;
+    border-radius: var(--r-md);
+    padding: 0.7rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.08s, box-shadow 0.12s;
+    box-shadow: 0 4px 14px rgba(139, 109, 255, 0.35);
+}
+.signin-card button:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(139, 109, 255, 0.5); }
+.signin-card button:active { transform: translateY(0); }
+.signin-card .signin-error {
+    color: var(--bad);
+    font-size: 0.78rem;
+    margin-top: 0.4rem;
+    min-height: 1.1em;
+}
+.signin-card .signin-hint {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-subtle);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-align: left;
+}
+.signin-card .signin-hint code {
+    background: var(--bg-deep);
+    border: 1px solid var(--border-subtle);
+    border-radius: 3px;
+    padding: 1px 6px;
+    color: var(--text-secondary);
+}
+
+/* ---------------------------------------------------------------------
+   Live stats strip in the header.  Replaces the single "X dumps · Y zones
+   · last merge Z" text node with an inline, equally-spaced 3-stat layout
+   that's easier to scan and styled to feel "live."
+--------------------------------------------------------------------- */
+.header-stats {
+    display: flex;
+    gap: 1.4rem;
+    margin: 0 1rem 0 0;
+}
+.header-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    line-height: 1;
+}
+.header-stat .v {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.01em;
+    font-variant-numeric: tabular-nums;
+}
+.header-stat .v.fresh { animation: numPulse 0.6s ease-out; }
+.header-stat .l {
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 0.18rem;
+    font-weight: 600;
+}
+@keyframes numPulse {
+    0%   { color: var(--accent); transform: scale(1.08); }
+    100% { color: var(--text);   transform: scale(1); }
+}
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+/* ---------------------------------------------------------------------
+   Floating canvas controls -- zoom in/out, fit-to-zone, and the live
+   zoom-percentage readout.  Sit in the top-right of the canvas wrap.
+--------------------------------------------------------------------- */
+.canvas-controls {
+    position: absolute;
+    top: 0.6rem;
+    right: 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    z-index: 5;
+    pointer-events: none;
+}
+.canvas-controls .ctrl-group {
+    display: flex;
+    flex-direction: column;
+    background: rgba(17, 21, 28, 0.75);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    overflow: hidden;
+    box-shadow: var(--shadow-md);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    pointer-events: auto;
+}
+.canvas-controls .ctrl-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    width: 32px;
+    height: 32px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.95rem;
+    font-weight: 700;
+    transition: background 0.1s, color 0.1s;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.canvas-controls .ctrl-btn:last-child { border-bottom: none; }
+.canvas-controls .ctrl-btn:hover { background: var(--accent-soft); color: var(--accent); }
+.canvas-controls .ctrl-btn:active { transform: scale(0.95); }
+.canvas-controls .zoom-pct {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-family: 'Consolas', monospace;
+    background: rgba(17, 21, 28, 0.75);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: 3px 7px;
+    text-align: center;
+    pointer-events: none;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+/* Smooth tab-pane swaps */
+.tab-pane:not([hidden]) { animation: fadeIn 0.15s ease-out; }

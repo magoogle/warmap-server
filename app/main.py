@@ -564,18 +564,23 @@ async def on_startup():
 
 
 # ----- Routes --------------------------------------------------------------
-# ----- Viewer (static) ----------------------------------------------------
+# ----- Viewer (static + dynamic index) ------------------------------------
 # Tiny SPA that fetches /zones, /zones/<key>, /actor-index, /status and
-# renders a live map.  Intended to be exposed only on a separate firewall-
-# locked port (the public 30100 just keeps serving the existing endpoints
-# without the viewer UI).
+# renders a live map.
 #
-# Cache policy: browsers + Cloudflare get told "no-cache, must-revalidate"
-# so a UI deploy is visible immediately to anyone hitting the viewer --
-# without this, CF's default 4-hour TTL on .css/.js means a site that's
-# been viewed in the past hour keeps the stale assets even after we deploy.
-# The actor catalog endpoints (/zones/{key} et al.) keep their own
-# ETag-based caching since they update on a 60s server cadence anyway.
+# Caching strategy
+# ----------------
+# index.html is served via a tiny dynamic route that injects cache-busting
+# query strings (?v=<file_mtime>) on the css/js asset references it pulls
+# in.  That way:
+#   * the HTML itself is always no-cache (so the latest version-tags ride)
+#   * the .css/.js are immutable for a given version-tag, can be cached
+#     forever -- but a deploy bumps the file mtime which bumps the tag,
+#     so the browser sees a different URL and fetches fresh.
+#
+# The static files themselves still ride a wrapped StaticFiles mount, but
+# we tell CF + browsers to honor the etag (validate on each request)
+# rather than rely on TTL.
 class _NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
@@ -588,10 +593,49 @@ class _NoCacheStaticFiles(StaticFiles):
         return resp
 
 
-_VIEWER_DIR = Path(__file__).resolve().parent / 'viewer'
+_VIEWER_DIR  = Path(__file__).resolve().parent / 'viewer'
+_VIEWER_TPL  = _VIEWER_DIR / 'index.html'
+
+def _viewer_asset_version() -> str:
+    """Compute a cache-busting tag from the css/js file mtimes.  Bump on
+    every deploy that changes either file -> browser fetches fresh."""
+    parts = []
+    for fname in ('viewer.css', 'viewer.js'):
+        p = _VIEWER_DIR / fname
+        try:
+            parts.append(str(int(p.stat().st_mtime)))
+        except OSError:
+            parts.append('0')
+    return '-'.join(parts)
+
+
 if _VIEWER_DIR.exists():
-    app.mount('/viewer', _NoCacheStaticFiles(directory=str(_VIEWER_DIR), html=True),
+    # Static mount for everything under /viewer/* EXCEPT the bare index --
+    # the index has its own dynamic route below.
+    app.mount('/viewer', _NoCacheStaticFiles(directory=str(_VIEWER_DIR), html=False),
               name='viewer')
+
+    @app.get('/viewer/', include_in_schema=False)
+    @app.get('/viewer',  include_in_schema=False)
+    def _viewer_index():
+        try:
+            html = _VIEWER_TPL.read_text(encoding='utf-8')
+        except OSError:
+            raise HTTPException(500, 'viewer template missing')
+        v = _viewer_asset_version()
+        # Inject ?v=<tag> on asset references.  Idempotent if the strings
+        # are unique enough (they are -- bare "viewer.css" / "viewer.js"
+        # only appear in the link/script tags).
+        html = html.replace('viewer.css',     f'viewer.css?v={v}')
+        html = html.replace('viewer.js',      f'viewer.js?v={v}')
+        return Response(
+            content=html, media_type='text/html; charset=utf-8',
+            headers={
+                'Cache-Control': 'no-cache, must-revalidate, max-age=0',
+                'Pragma':        'no-cache',
+                'Expires':       '0',
+            },
+        )
 
 
 @app.get('/')

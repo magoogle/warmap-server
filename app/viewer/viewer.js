@@ -333,13 +333,103 @@ function adminFetch(path, init) {
     return fetch(path, init);
 }
 
+// ---- Sign-in overlay -----------------------------------------------------
+// Replaces the silent "stuck on connecting..." state when no admin key is
+// set or the saved key gets rejected.  Shows immediately on boot if
+// localStorage has no key, or pops back up if any auth-required fetch
+// returns 401.
+function showSigninOverlay(errorMsg) {
+    const o = document.getElementById('signin-overlay');
+    const inp = document.getElementById('signin-input');
+    const err = document.getElementById('signin-error');
+    if (!o) return;
+    if (err) err.textContent = errorMsg || '';
+    o.hidden = false;
+    setTimeout(() => inp && inp.focus(), 50);
+}
+function hideSigninOverlay() {
+    const o = document.getElementById('signin-overlay');
+    if (o) o.hidden = true;
+}
+async function attemptSignin(key) {
+    const trimmed = (key || '').trim();
+    if (!trimmed) { showSigninOverlay('paste a key first'); return false; }
+    // Validate by hitting /status with the proposed key.
+    try {
+        const r = await fetch('/status', {
+            cache: 'no-store',
+            headers: { 'X-WarMap-Key': trimmed },
+        });
+        if (r.status === 401) {
+            showSigninOverlay('rejected -- bad key, or it was disabled');
+            return false;
+        }
+        if (!r.ok) {
+            showSigninOverlay(`server returned HTTP ${r.status}`);
+            return false;
+        }
+    } catch (e) {
+        showSigninOverlay(`network error: ${e.message}`);
+        return false;
+    }
+    S.adminKey = trimmed;
+    localStorage.setItem('warmap_admin_key', trimmed);
+    hideSigninOverlay();
+    // Kick off a refresh now that we're authenticated.
+    refreshStatus();
+    refreshZoneList();
+    refreshUploaders();
+    return true;
+}
+document.getElementById('signin-btn')?.addEventListener('click', () => {
+    const inp = document.getElementById('signin-input');
+    if (inp) attemptSignin(inp.value);
+});
+document.getElementById('signin-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        attemptSignin(e.target.value);
+    }
+});
+
+// ---- Header live stats ---------------------------------------------------
+// Shorter, more-glanceable replacement for the single status text node.
+// Highlights individual numbers when they change so an active server
+// pulses subtly in the corner.
+function fmtAgo(t) {
+    if (!t) return 'never';
+    const sec = Math.max(0, Math.round(Date.now() / 1000 - t));
+    if (sec < 60)    return sec + 's';
+    if (sec < 3600)  return Math.round(sec / 60) + 'm';
+    if (sec < 86400) return Math.round(sec / 3600) + 'h';
+    return Math.round(sec / 86400) + 'd';
+}
+function setHeaderStat(id, value) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el.textContent !== String(value)) {
+        el.textContent = value;
+        // Restart the pulse animation by removing + re-adding the class.
+        el.classList.remove('fresh');
+        // eslint-disable-next-line no-unused-expressions
+        el.offsetWidth;
+        el.classList.add('fresh');
+    }
+}
+
 // ---- Status + zone list --------------------------------------------------
 async function refreshStatus() {
     try {
         const s = await getJSON('/status');
         const m = s.last_merge || {};
         const fin = m.finished_at;
-        D.state.textContent = `${s.dumps_count} dumps · ${s.zones_count} zones · last merge ${fin ? prettyAgo(fin) : 'never'}`;
+        // New 3-stat header layout.  Old single-text status node is hidden
+        // in HTML but kept around in the DOM for any code that still pokes it.
+        setHeaderStat('stat-dumps-v', s.dumps_count.toLocaleString());
+        setHeaderStat('stat-zones-v', s.zones_count.toLocaleString());
+        setHeaderStat('stat-merge-v', fin ? fmtAgo(fin) + ' ago' : 'never');
+        if (D.state) D.state.textContent =
+            `${s.dumps_count} dumps · ${s.zones_count} zones · last merge ${fin ? prettyAgo(fin) : 'never'}`;
         if (fin && fin !== S.lastMergeT) {
             S.lastMergeT = fin;
             // The merger ran -- every zone may have changed.  Wipe the
@@ -353,7 +443,13 @@ async function refreshStatus() {
             if (S.currentKey) await loadZone(S.currentKey, false);
         }
     } catch (e) {
-        D.state.textContent = `disconnected: ${e.message}`;
+        if (D.state) D.state.textContent = `disconnected: ${e.message}`;
+        // Auth failures specifically: show the sign-in overlay rather than
+        // leaving the user staring at "disconnected" text.  Heuristic:
+        // /status returning 401 (which getJSON throws as "HTTP 401").
+        if (/HTTP 401/.test(String(e.message))) {
+            showSigninOverlay('your saved key was rejected -- paste a current one');
+        }
     }
 }
 
@@ -967,6 +1063,54 @@ D.canvas.addEventListener('wheel', e => {
 
 D.canvas.addEventListener('mouseleave', () => { D.tooltip.hidden = true; S.hoveredActor = null; render(); });
 
+// ---- Floating canvas controls (zoom in/out, fit, zoom %) ----------------
+// Buttons live in .canvas-controls (top-right of canvas-wrap).  They map
+// to the same math as the wheel handler but anchored at canvas center,
+// so clicking + or - zooms the middle of the view.  Keyboard shortcut
+// 'f' fits the zone to the viewport.
+function zoomBy(factor) {
+    const w = D.canvas.width;
+    const h = D.canvas.height;
+    const oldScale = S.view.scale;
+    const newScale = Math.max(0.1, Math.min(80, oldScale * factor));
+    if (newScale === oldScale) return;
+    // Anchor at canvas center so button-driven zoom feels stable.
+    const r = newScale / oldScale;
+    S.view.panX = r * S.view.panX;
+    S.view.panY = r * S.view.panY;
+    S.view.scale = newScale;
+    updateZoomReadout();
+    render();
+}
+function fitToZone() {
+    S.view = { panX: 0, panY: 0, scale: 1.0 };
+    updateZoomReadout();
+    render();
+}
+function updateZoomReadout() {
+    const el = document.getElementById('canvas-zoom-pct');
+    if (el) el.textContent = Math.round(S.view.scale * 100) + '%';
+}
+document.getElementById('canvas-zoom-in') ?.addEventListener('click', () => zoomBy(1.25));
+document.getElementById('canvas-zoom-out')?.addEventListener('click', () => zoomBy(0.8));
+document.getElementById('canvas-fit')     ?.addEventListener('click', () => fitToZone());
+window.addEventListener('keydown', (e) => {
+    // Skip when user is typing in an input
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    if (e.key === 'f' || e.key === 'F') { fitToZone(); }
+    if (e.key === '+' || e.key === '=') { zoomBy(1.25); }
+    if (e.key === '-' || e.key === '_') { zoomBy(0.8); }
+});
+// Update readout on every wheel zoom too -- the wheel handler doesn't
+// route through zoomBy().  Cheap to call render() once but we just need
+// to read the post-render scale, so subscribe via a small wrapper.
+const _origRender = window.render;   // noop -- the IIFE pattern means
+// `render` isn't on window; instead we hook by modifying view.scale.
+// Simplest: add an after-render callback by walking through wheel handler.
+// The wheel handler at line ~1027 mutates S.view.scale and calls render();
+// piggy-back by listening to the canvas wheel event AFTER its handler.
+D.canvas.addEventListener('wheel', updateZoomReadout, { passive: true });
+
 // ---- Actor info panel ----------------------------------------------------
 function renderActorPanel() {
     const a = S.selectedActor;
@@ -1435,14 +1579,34 @@ async function pollLoop() {
 }
 
 (async function init() {
-    await refreshStatus();
-    await refreshZoneList();
-    await refreshUploaders();
+    // Sign-in gate: if no key is in localStorage we can't fetch anything
+    // (every read endpoint requires X-WarMap-Key).  Show the overlay and
+    // wait for the user to paste a key -- attemptSignin() resumes the
+    // boot sequence once auth succeeds.
+    if (!S.adminKey) {
+        showSigninOverlay();
+        // Still spin up the poll loop + canvas sizer; both no-op cleanly
+        // until adminKey is set, and refresh() uses authHeaders() which
+        // will pick up the new key automatically.
+    } else {
+        try {
+            await refreshStatus();
+            await refreshZoneList();
+            await refreshUploaders();
+        } catch (e) {
+            // refreshStatus() already handles 401 -> overlay; other errors
+            // will surface in the status node and the user can retry.
+        }
+    }
     pollLoop();
     requestAnimationFrame(() => {
         const r = D.canvas.parentElement.getBoundingClientRect();
         D.canvas.width  = Math.max(800, r.width);
         D.canvas.height = Math.max(600, r.height);
         if (S.currentData) render();
+        updateZoomReadout();
     });
+    // Render the layer panel once at boot so the Layers tab is ready
+    // immediately even before the user clicks it.
+    renderLayerPanel();
 })();
