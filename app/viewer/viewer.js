@@ -217,13 +217,24 @@ function actorDisplayName(a) {
 }
 
 // ---- Fetch helpers -------------------------------------------------------
+// Every read endpoint on the server now requires X-WarMap-Key.  The viewer
+// loads the operator's admin key from localStorage at boot (S.adminKey) so
+// we attach it to every fetch.  When no key is set, requests still go out
+// (server returns 401, surfaced as "disconnected: HTTP 401" in the status
+// line, which is the user's cue to enter their key in the input above the
+// sidebar).
+function authHeaders() {
+    return S.adminKey ? { 'X-WarMap-Key': S.adminKey } : {};
+}
 async function getJSON(p, opts) {
-    const r = await fetch(p, Object.assign({ cache: 'no-store' }, opts || {}));
+    const init = Object.assign({ cache: 'no-store' }, opts || {});
+    init.headers = Object.assign({}, init.headers, authHeaders());
+    const r = await fetch(p, init);
     if (!r.ok) throw new Error(`${p}: HTTP ${r.status}`);
     return r.json();
 }
 async function getText(p) {
-    const r = await fetch(p, { cache: 'no-store' });
+    const r = await fetch(p, { cache: 'no-store', headers: authHeaders() });
     if (!r.ok) throw new Error(`${p}: HTTP ${r.status}`);
     return r.text();
 }
@@ -1119,9 +1130,10 @@ async function keyAction(act, name) {
 // without a viewer reload.
 async function loadResetZoneList() {
     try {
-        const r = await fetch('/zones');
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        const d = await r.json();
+        // Use getJSON so the X-WarMap-Key header is attached -- /zones is
+        // gated, so a bare fetch() here would 401 even when the rest of
+        // the viewer is authenticated.
+        const d = await getJSON('/zones');
         const zones = (d.zones || []).slice().sort();
         D.resetZoneSelect.innerHTML =
             '<option value="">-- pick a zone --</option>' +
