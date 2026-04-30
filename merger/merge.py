@@ -201,9 +201,34 @@ class CellAgg:
     def total(self) -> int:
         return self.walk + self.block
 
+    # Tunables for the transient-wall override.  Boss rooms in lairs
+    # (Boss_WT*_*) and Hordes wave-end gates have walls that exist ONLY
+    # while the boss is alive / wave is active.  Recordings made during
+    # those moments observe the cells as blocked; recordings made after
+    # the boss dies / wave ends observe them walkable.  Pure majority vote
+    # leaves them as black boxes if more recordings happened during the
+    # gated state than after.
+    #
+    # Override: if at least WALK_FLOOR observations saw the cell walkable
+    # AND the walkable fraction exceeds WALK_RATIO_FLOOR, declare walkable
+    # even when block-votes outnumber walk-votes.  Floor + ratio together
+    # prevent single-observation noise (clipping bugs) from flipping real
+    # walls.
+    WALK_FLOOR = 2
+    WALK_RATIO_FLOOR = 0.10
+
     @property
     def is_walkable(self) -> bool:
-        return self.walk >= self.block
+        if self.walk == 0:
+            return False
+        if self.walk >= self.block:
+            return True
+        # Block-majority -- check transient-wall override.
+        if (self.walk >= CellAgg.WALK_FLOOR
+            and self.total > 0
+            and self.walk / self.total >= CellAgg.WALK_RATIO_FLOOR):
+            return True
+        return False
 
     @property
     def confidence(self) -> float:

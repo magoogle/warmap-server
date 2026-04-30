@@ -169,10 +169,9 @@ const ACTOR_STYLE = {
     boss:                    { c: '#ff0033', sym: 'B',  label: 'Boss' },
     elite:                   { c: '#ff7733', sym: 'e',  label: 'Elite' },
     champion:                { c: '#ffaa55', sym: 'c',  label: 'Champion' },
-    // Hordes interactables
-    boon:                    { c: '#33ff99', sym: 'b',  label: 'Boon' },
-    bane:                    { c: '#cc3399', sym: 'X',  label: 'Bane' },
-    aether:                  { c: '#99ccff', sym: 'a',  label: 'Aether' },
+    // Hordes interactables (pylons = the wave-modifier "boons" players pick)
+    pylon:                   { c: '#33ff99', sym: 'p',  label: 'Pylon' },
+    aether_structure:        { c: '#99ccff', sym: 'a',  label: 'Aether' },
 };
 const KIND_OVERRIDES = {
     pit_obelisk:'Pit Obelisk', undercity_obelisk:'Undercity Obelisk',
@@ -185,7 +184,7 @@ const KIND_OVERRIDES = {
     undercity_exit:'Undercity Floor Switch',
     objective:'Objective', enticement:'Beacon',
     boss:'Boss', elite:'Elite', champion:'Champion',
-    boon:'Hordes Boon', bane:'Hordes Bane', aether:'Aether Pickup',
+    pylon:'Hordes Pylon', aether_structure:'Aether Structure',
 };
 
 function actorDisplayName(a) {
