@@ -1578,35 +1578,61 @@ async function pollLoop() {
     }
 }
 
-(async function init() {
-    // Sign-in gate: if no key is in localStorage we can't fetch anything
-    // (every read endpoint requires X-WarMap-Key).  Show the overlay and
-    // wait for the user to paste a key -- attemptSignin() resumes the
-    // boot sequence once auth succeeds.
-    if (!S.adminKey) {
-        showSigninOverlay();
-        // Still spin up the poll loop + canvas sizer; both no-op cleanly
-        // until adminKey is set, and refresh() uses authHeaders() which
-        // will pick up the new key automatically.
-    } else {
-        try {
-            await refreshStatus();
-            await refreshZoneList();
-            await refreshUploaders();
-        } catch (e) {
-            // refreshStatus() already handles 401 -> overlay; other errors
-            // will surface in the status node and the user can retry.
-        }
+// Top-level safety net: any uncaught error during init or runtime
+// surfaces a visible banner instead of a silent dead viewer.  Without
+// this, a regression in render() / refreshStatus() / etc. just leaves
+// the page blank with --/--/-- in the header stats.
+function showFatalBanner(msg) {
+    let b = document.getElementById('fatal-banner');
+    if (!b) {
+        b = document.createElement('div');
+        b.id = 'fatal-banner';
+        b.style.cssText = `
+            position:fixed; top:0; left:0; right:0; z-index:9999;
+            background:#3a0d11; color:#ffb4bc; padding:0.6rem 1rem;
+            font:0.85rem/1.4 -apple-system,Segoe UI,sans-serif;
+            border-bottom:1px solid #6b1c25; box-shadow:0 4px 12px rgba(0,0,0,0.5);
+        `;
+        document.body && document.body.appendChild(b);
     }
-    pollLoop();
-    requestAnimationFrame(() => {
-        const r = D.canvas.parentElement.getBoundingClientRect();
-        D.canvas.width  = Math.max(800, r.width);
-        D.canvas.height = Math.max(600, r.height);
-        if (S.currentData) render();
-        updateZoomReadout();
-    });
-    // Render the layer panel once at boot so the Layers tab is ready
-    // immediately even before the user clicks it.
-    renderLayerPanel();
+    b.innerHTML = `<strong>Viewer error.</strong> ${msg} &mdash;
+        <a href="javascript:location.reload()" style="color:inherit;text-decoration:underline">reload</a> /
+        <a href="javascript:localStorage.clear();location.reload()" style="color:inherit;text-decoration:underline">clear cache + reload</a>`;
+}
+window.addEventListener('error',  (e) => showFatalBanner('JS error: ' + (e.message || 'unknown')));
+window.addEventListener('unhandledrejection', (e) => showFatalBanner('promise rejection: ' + (e.reason?.message || e.reason || 'unknown')));
+
+(async function init() {
+    try {
+        // Sign-in gate: if no key in localStorage, every gated endpoint
+        // returns 401.  Show the overlay and let attemptSignin() resume
+        // the boot sequence once the user pastes a key.
+        if (!S.adminKey) {
+            showSigninOverlay();
+        } else {
+            try {
+                await refreshStatus();
+                await refreshZoneList();
+                await refreshUploaders();
+            } catch (e) {
+                // 401 -> attemptSignin path already showed the overlay
+                // via refreshStatus's catch.  For any other error,
+                // surface it so the user knows something's wrong.
+                if (!/HTTP 401/.test(String(e?.message || e))) {
+                    showFatalBanner('initial fetch failed: ' + (e?.message || e));
+                }
+            }
+        }
+        pollLoop();
+        requestAnimationFrame(() => {
+            const r = D.canvas.parentElement.getBoundingClientRect();
+            D.canvas.width  = Math.max(800, r.width);
+            D.canvas.height = Math.max(600, r.height);
+            if (S.currentData) render();
+            try { updateZoomReadout(); } catch (e) {}
+        });
+        try { renderLayerPanel(); } catch (e) { /* tab not opened yet, ok */ }
+    } catch (e) {
+        showFatalBanner('init crashed: ' + (e?.message || e) + ' (line ' + (e?.lineNumber || '?') + ')');
+    }
 })();
