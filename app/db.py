@@ -323,6 +323,14 @@ class DB:
         with self.write() as c:
             c.execute('DELETE FROM sessions WHERE name = ?', (name,))
 
+    def list_session_mtimes(self) -> dict:
+        """{name -> mtime} for every session row.  Used by the server's
+        startup indexer to skip parsing dumps whose mtime already
+        matches the DB's record -- avoids re-walking thousands of
+        files on every uvicorn worker spawn."""
+        rows = self.query('SELECT name, mtime FROM sessions')
+        return {r['name']: r['mtime'] for r in rows}
+
     def list_sessions(self, *, client_id: Optional[str] = None,
                       zone: Optional[str] = None,
                       limit: int = 500) -> list[sqlite3.Row]:

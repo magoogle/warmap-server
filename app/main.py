@@ -169,15 +169,46 @@ def _summarize_dump(path: Path) -> dict:
 
 
 def _index_existing_dumps():
-    n = 0
+    """Re-index any dumps the DB doesn't already have at their current
+    mtime.  Critical that this is FAST: 12 uvicorn workers each run
+    this on import, so a 1000-dump folder used to mean 12k full NDJSON
+    parses on container start (each worker walking the entire dumps
+    dir + parsing each file end-to-end via _summarize_dump).  With
+    the upsert_session adding a SELECT-before-INSERT for the
+    re-upload-mtime fix, the per-call cost grew further and pushed
+    cold start past 1 minute -- workers were still indexing while the
+    HTTP port stayed unbound, so the server appeared down.
+
+    Fast path now: read all (name, mtime) pairs out of the DB up
+    front in one query, then skip _summarize_dump for any dump whose
+    file-system mtime matches what's already there.  Only newly-
+    uploaded or modified dumps pay the parse cost on startup.
+    """
+    try:
+        existing = DBI.list_session_mtimes()    # {name -> mtime}
+    except Exception as e:
+        print(f'[startup] could not preload session mtimes: {e}', file=sys.stderr)
+        existing = {}
+    parsed = 0
+    skipped = 0
     for p in DUMPS_DIR.glob('*.ndjson'):
         try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        prev_mt = existing.get(p.name)
+        # Tolerate sub-millisecond float jitter from filesystem stat.
+        if prev_mt is not None and abs(prev_mt - mtime) < 0.01:
+            skipped += 1
+            continue
+        try:
             DBI.upsert_session(**_summarize_dump(p))
-            n += 1
+            parsed += 1
         except Exception:
             pass
-    if n:
-        print(f'[startup] indexed {n} existing dumps')
+    if parsed or skipped:
+        print(f'[startup] indexed {parsed} new/changed dumps '
+              f'(skipped {skipped} unchanged)')
 
 _index_existing_dumps()
 
