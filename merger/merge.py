@@ -321,11 +321,34 @@ class FloorMetaAgg:
 
 @dataclass
 class KeyAgg:
-    """Aggregated geometry + actors for one merge key (zone or pit-world)."""
+    """Aggregated geometry + actors for one merge key (zone or pit-world).
+
+    PER-FLOOR KEYING (important).  Both `cells_by_floor` and
+    `floors_meta` are keyed by *world_id* (the host's stable per-world
+    hash), NOT by session-local floor index.  This is the fix for the
+    cross-session floor-counter drift bug:  the recorder's floor counter
+    is session-internal (1..N as the session enters new world_ids), so
+    two sessions visiting the same multi-world zone in different orders
+    used to assign different floor numbers to the same world -- a boss
+    from world_03 ended up on what one session called floor 2 and
+    another session called floor 3, and the merger mashed them
+    together.
+
+    Keying by world_id gives every world a stable slot regardless of
+    when a given session reached it.  At emit time we sort the
+    world_ids by their representative world name (alphabetical) and
+    assign 1..N floor numbers deterministically -- so SnakeTemple_01
+    is always floor 1, _02 always floor 2, _03 always floor 3, no
+    matter what order any session entered them.
+
+    Legacy/missing world_id (older dumps without to_world_id in their
+    floor_change events): bucketed under negative integer keys
+    (-floor_idx) to avoid collision with real world_ids; sorted last
+    at emit time."""
     key: str
     key_type: str                                      # 'zone' or 'pit_world'
     grid_resolution: float = 0.5
-    # cells_by_floor[floor][(cx, cy)] -> CellAgg
+    # cells_by_floor[world_id_or_neg_legacy][(cx, cy)] -> CellAgg
     cells_by_floor: dict[int, dict[CellKey, CellAgg]] = field(
         default_factory=lambda: collections.defaultdict(dict))
     actors: dict[ActorKey, ActorAgg] = field(default_factory=dict)
@@ -336,13 +359,41 @@ class KeyAgg:
     # lists.
     worlds:    set[str] = field(default_factory=set)
     world_ids: set[int] = field(default_factory=set)
-    # Per-floor breakdown (floor_idx -> FloorMetaAgg).  defaultdict so
+    # Per-floor breakdown (world_id -> FloorMetaAgg).  defaultdict so
     # callers can floors_meta[k].worlds.add(...) without a key check.
     floors_meta: dict[int, FloorMetaAgg] = field(
         default_factory=lambda: collections.defaultdict(FloorMetaAgg))
     # Saturation tracking: history of cells_total after each session merge
     cells_history: list[tuple[int, int]] = field(default_factory=list)
                                                     # [(unix_ts, cells_total), ...]
+
+
+def _resolve_floor_key(rec: Record, floor_idx: int) -> int:
+    """Map a session-local floor_idx to a stable per-world key for the
+    KeyAgg's cells_by_floor / floors_meta dicts.
+
+    Preference order:
+      1. rec.floor_world_ids[floor_idx]  -- explicit per-floor world_id
+         from a floor_change event's `to_world_id` metadata.  Always
+         present for floor 1 (set from header.world_id) and for any
+         floor reached via a floor_change event in a recorder that
+         carries to_world_id (post-WarMapRecorder@cf3a8df ish).
+      2. rec.world_id                    -- header's world_id, valid
+         only for floor 1 (the entry floor); falling back to this for
+         later floors would conflate them.
+      3. -floor_idx                      -- legacy sentinel for old
+         dumps that lacked to_world_id.  Negative so it can't collide
+         with a real world_id (which are unsigned 32-bit hashes).
+
+    This is the single chokepoint where the recorder's session-local
+    floor counter gets translated to a global stable key; everywhere
+    else in the merger keys are world_ids."""
+    wid = rec.floor_world_ids.get(floor_idx)
+    if wid:
+        return wid
+    if floor_idx == 1 and rec.world_id:
+        return rec.world_id
+    return -int(floor_idx)
 
 
 def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
@@ -354,6 +405,10 @@ def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
 
     if rec.activity_kind == 'pit':
         # Each floor's cells/actors belong to that floor's WORLD (template).
+        # Pit `key = world name` -> each pit_world is its own merge bucket;
+        # within the bucket there's effectively one floor.  We still key
+        # cells_by_floor by the world_id so the emit path is uniform
+        # with zone-keyed records.
         for floor_idx, cells in rec.grid_cells_by_floor.items():
             world = rec.floor_worlds.get(floor_idx)
             if not world:
@@ -363,24 +418,23 @@ def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
             agg.activity_kinds.add('pit')
             agg.sessions.add(rec.session_id)
             agg.grid_resolution = rec.grid_resolution
-            # Pit key IS the world name -- worlds set is degenerate
-            # (always one entry == agg.key) but we still record it so
-            # the viewer code path is uniform across zone/pit_world.
             agg.worlds.add(world)
             wid = rec.floor_world_ids.get(floor_idx)
             if wid:
                 agg.world_ids.add(wid)
-            fm = agg.floors_meta[1]
+            floor_key = _resolve_floor_key(rec, floor_idx)
+            fm = agg.floors_meta[floor_key]
             fm.worlds.add(world)
-            if wid:
-                fm.world_ids.add(wid)
+            if wid: fm.world_ids.add(wid)
             fm.sessions.add(rec.session_id)
-            cell_map = agg.cells_by_floor[1]   # within the template, only one floor
+            cell_map = agg.cells_by_floor[floor_key]
             for cx, cy, w in cells:
                 _vote_cell(cell_map, cx, cy, w)
+            # Re-tag actors with the resolved floor key so _merge_actor's
+            # ActorKey dedup is per-world rather than per-session-floor.
             for a in rec.actors:
                 if a.get('floor') == floor_idx:
-                    _merge_actor(agg.actors, a, rec.session_id)
+                    _merge_actor(agg.actors, a, rec.session_id, floor_key)
             touched.append(key)
 
     elif rec.activity_kind in ZONE_KEYED_ACTIVITIES:
@@ -390,37 +444,43 @@ def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
         agg.sessions.add(rec.session_id)
         agg.grid_resolution = rec.grid_resolution
         # Top-level worlds is the union of (header world) + (every per-
-        # floor world we observed via floor_change events).  The header
-        # world alone is misleading for multi-floor zones (undercity
-        # drops you into floor 1's world; floors 2+ are different
-        # worlds reached only mid-session).  Aggregating both lets the
-        # viewer's "worlds:" row show e.g. UC_Ziggurat_01,
-        # UC_Ziggurat_02, UC_Ziggurat_03 rather than just the entrance.
-        if rec.world:
-            agg.worlds.add(rec.world)
-        if rec.world_id:
-            agg.world_ids.add(rec.world_id)
+        # floor world we observed via floor_change events).
+        if rec.world:    agg.worlds.add(rec.world)
+        if rec.world_id: agg.world_ids.add(rec.world_id)
         for w in rec.floor_worlds.values():
             if w: agg.worlds.add(w)
         for wid in rec.floor_world_ids.values():
             if wid: agg.world_ids.add(wid)
-        # Per-floor meta: prefer the floor-change-event-tracked maps
-        # (they cover every floor visited mid-session) and fall back to
-        # the header's zone-level world+world_id for floors that were
-        # never explicitly transitioned to.
-        for floor_idx in rec.grid_cells_by_floor.keys():
-            fm = agg.floors_meta[floor_idx]
+
+        # Resolve every session-local floor_idx -> stable bucket key
+        # (world_id or legacy sentinel) up front so cells, actors, and
+        # floors_meta all agree on the same per-floor identity.
+        floor_keys: dict[int, int] = {
+            f: _resolve_floor_key(rec, f)
+            for f in rec.grid_cells_by_floor.keys()
+        }
+        # Also include floors that show up only in actor entries (rare,
+        # but possible when a session captured an actor on a floor it
+        # never sampled cells for).
+        for a in rec.actors:
+            f = a.get('floor', 1)
+            if f not in floor_keys:
+                floor_keys[f] = _resolve_floor_key(rec, f)
+
+        for floor_idx, floor_key in floor_keys.items():
+            fm = agg.floors_meta[floor_key]
             fw  = rec.floor_worlds.get(floor_idx)    or rec.world
             fwi = rec.floor_world_ids.get(floor_idx) or rec.world_id
             if fw:  fm.worlds.add(fw)
             if fwi: fm.world_ids.add(fwi)
             fm.sessions.add(rec.session_id)
         for floor_idx, cells in rec.grid_cells_by_floor.items():
-            cell_map = agg.cells_by_floor[floor_idx]
+            cell_map = agg.cells_by_floor[floor_keys[floor_idx]]
             for cx, cy, w in cells:
                 _vote_cell(cell_map, cx, cy, w)
         for a in rec.actors:
-            _merge_actor(agg.actors, a, rec.session_id)
+            f = a.get('floor', 1)
+            _merge_actor(agg.actors, a, rec.session_id, floor_keys.get(f, _resolve_floor_key(rec, f)))
         touched.append(key)
 
     else:
@@ -509,7 +569,21 @@ def _vote_cell(cell_map: dict[CellKey, CellAgg], cx: int, cy: int, w: int) -> No
     cell_map[k].vote(w == 1)
 
 
-def _merge_actor(actors: dict[ActorKey, ActorAgg], a: dict, session_id: str) -> None:
+def _merge_actor(actors: dict[ActorKey, ActorAgg], a: dict, session_id: str,
+                 floor_key: Optional[int] = None) -> None:
+    """Dedup an actor entry into the per-zone aggregate.
+
+    `floor_key` is the resolved per-world bucket key (world_id, or the
+    legacy negative sentinel) -- callers pass it from
+    `_resolve_floor_key`.  When omitted (legacy callers / direct
+    invocation by tests), falls back to the actor's session-local
+    `floor` field; that path is only safe for single-floor zones since
+    multi-world zones produce drift across sessions.
+
+    The ActorKey carries the floor_key (not session-local floor),
+    which is the whole point of the post-bug-fix keying: a boss
+    sighting in world_03 always lands in the same ActorAgg regardless
+    of whether the session called that world floor 2 or floor 3."""
     skin = a.get('skin')
     if not skin:
         return
@@ -517,8 +591,9 @@ def _merge_actor(actors: dict[ActorKey, ActorAgg], a: dict, session_id: str) -> 
         return
     rx = round(a.get('x', 0))
     ry = round(a.get('y', 0))
-    floor = a.get('floor', 1)
-    key = (skin, rx, ry, floor)
+    if floor_key is None:
+        floor_key = a.get('floor', 1)
+    key = (skin, rx, ry, floor_key)
     if key not in actors:
         actors[key] = ActorAgg(
             skin=skin,
@@ -526,7 +601,7 @@ def _merge_actor(actors: dict[ActorKey, ActorAgg], a: dict, session_id: str) -> 
             x=a.get('x', 0),
             y=a.get('y', 0),
             z=a.get('z', 0),
-            floor=floor,
+            floor=floor_key,
             first_seen_session=session_id,
             first_seen_t=a.get('first_t', 0),
             type_id=a.get('type_id'),
@@ -572,14 +647,63 @@ def is_saturated(agg: KeyAgg) -> tuple[bool, dict]:
 # Output emission
 # ---------------------------------------------------------------------------
 
+def _build_floor_remap(agg: KeyAgg) -> tuple[dict[int, int], list[int]]:
+    """Pick a deterministic 1..N emit-floor ordering for one KeyAgg's
+    internal world-keyed buckets.  Returns (floor_remap, sorted_keys).
+
+    Sort by representative world NAME alphabetically -- D4 conventions
+    like X1_Undercity_SnakeTemple_01/_02/_03 already encode logical
+    order, so alpha-sort gives the right floor numbers without us
+    having to invent a per-zone schema.  World_ids without any known
+    name fall back to numeric sort; legacy negative keys (sentinel for
+    older dumps that lacked to_world_id) sort last in their original
+    index order.
+
+    Used by emit_curated for the per-zone JSON and by emit_actor_index
+    for the universal index -- both must agree on which world becomes
+    floor N or actor entries land on inconsistent floor numbers
+    between the two outputs.
+    """
+    def _world_sort_key(world_key: int) -> tuple:
+        meta = agg.floors_meta.get(world_key)
+        names = meta.worlds if meta else None
+        if names:
+            # Bucket 0: worlds we know the name of -- alphabetical wins
+            return (0, sorted(names)[0])
+        if world_key < 0:
+            # Bucket 1: legacy floor-idx fallback, preserve original
+            # session-local order so older single-floor zones don't
+            # get reshuffled.
+            return (1, -world_key)
+        # Bucket 2: world_id we have but no name for; sort numerically.
+        return (2, world_key)
+
+    all_keys = set(agg.cells_by_floor.keys()) | set(agg.floors_meta.keys())
+    for a in agg.actors.values():
+        all_keys.add(a.floor)
+    sorted_keys = sorted(all_keys, key=_world_sort_key)
+    return ({wk: idx for idx, wk in enumerate(sorted_keys, start=1)}, sorted_keys)
+
+
 def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     """Write a curated `<key>.json` for one merge key. Returns the path."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compute bbox + actors-per-floor count for the loader's quick checks
+    # ----- Per-world floor renumbering -----------------------------------
+    # KeyAgg.cells_by_floor / floors_meta / agg.actors[*].floor are all
+    # internally keyed by world_id (or a negative legacy sentinel).  At
+    # emit time we pick a deterministic 1..N ordering and translate.
+    floor_remap, sorted_floor_keys = _build_floor_remap(agg)
+
+    # Compute bbox + per-floor cell rows.  We iterate sorted_floor_keys
+    # rather than agg.cells_by_floor so the emitted floor numbers are
+    # stable even for floors that exist only in floors_meta (no cells
+    # captured yet).
     bbox = None
     cells_out_by_floor: dict[str, list[list[int]]] = {}
-    for floor, cells in agg.cells_by_floor.items():
+    for wkey in sorted_floor_keys:
+        emit_idx = floor_remap[wkey]
+        cells = agg.cells_by_floor.get(wkey) or {}
         rows: list[list[int]] = []
         for (cx, cy), agg_cell in cells.items():
             rows.append([
@@ -596,7 +720,7 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
                 if wy < bbox[1]: bbox[1] = wy
                 if wx > bbox[2]: bbox[2] = wx
                 if wy > bbox[3]: bbox[3] = wy
-        cells_out_by_floor[str(floor)] = rows
+        cells_out_by_floor[str(emit_idx)] = rows
 
     # Mobile-actor collapse.  Bosses + champions are single in-world
     # entities that move during their fight, so the recorder emits N
@@ -617,9 +741,14 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     MOBILE_KINDS = {'boss', 'champion'}
 
     actors_out: list[dict] = []
-    # Cluster bucket: (skin, sno_id, floor) -> list[ActorAgg]
+    # Cluster bucket: (skin, sno_id, world_key) -> list[ActorAgg].
+    # We group by the internal world_key (same as agg.actors keys), then
+    # translate to emit-floor at the end -- ensures cluster identity
+    # follows world identity, not whatever floor number any session
+    # happened to assign.
     mobile_clusters: dict[tuple, list[ActorAgg]] = {}
     for _key, a in agg.actors.items():
+        emit_floor = floor_remap.get(a.floor, a.floor)
         if a.kind in MOBILE_KINDS and a.sno_id is not None:
             mobile_clusters.setdefault((a.skin, a.sno_id, a.floor), []).append(a)
         else:
@@ -627,7 +756,7 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
                 'skin': a.skin,
                 'kind': a.kind,
                 'x': a.x, 'y': a.y, 'z': a.z,
-                'floor': a.floor,
+                'floor': emit_floor,
                 'sessions_seen': len(a.sessions_seen),
                 'total_observations': a.total_observations,
             }
@@ -642,7 +771,7 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     # (e.g. an elite that didn't move much, or a boss observed once)
     # behave identically to a pass-through emission -- the loop is
     # safe to use uniformly.
-    for (skin, sno_id, floor), entries in mobile_clusters.items():
+    for (skin, sno_id, world_key), entries in mobile_clusters.items():
         # Observation-weighted centroid.  Falls back to a uniform
         # average when total weight is 0 (shouldn't happen, but cheap
         # to handle defensively).
@@ -684,7 +813,7 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
             'skin': skin,
             'kind': ex0.kind,
             'x': round(wx, 1), 'y': round(wy, 1), 'z': round(wz, 1),
-            'floor': floor,
+            'floor': floor_remap.get(world_key, world_key),
             'sessions_seen': len(sessions_seen),
             'total_observations': total_obs,
         }
@@ -704,14 +833,15 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
 
     saturated, sat_info = is_saturated(agg)
 
-    # Per-floor diagnostic block.  Mirrors the cells_out_by_floor key
-    # convention (str(floor_idx)) so the viewer can index both maps
-    # with the same key.  Sessions count rather than the full session
-    # ID set -- the set can be 100+ entries on busy zones; consumers
-    # don't need the IDs, just the count.
+    # Per-floor diagnostic block.  Translated through floor_remap so it
+    # lines up with cells_out_by_floor's keys (the renumbered 1..N
+    # emit-floor indices).  agg.floors_meta is keyed by world_id
+    # internally; we drop that internal key and only surface the
+    # emit-floor index, the world name(s), and the world_id list.
     floors_meta_out: dict[str, dict] = {}
-    for fid, fm in agg.floors_meta.items():
-        floors_meta_out[str(fid)] = {
+    for wkey, fm in agg.floors_meta.items():
+        emit_idx = floor_remap.get(wkey, wkey)
+        floors_meta_out[str(emit_idx)] = {
             'worlds':        sorted(fm.worlds),
             'world_ids':     sorted(fm.world_ids),
             'sessions':      len(fm.sessions),
@@ -1042,6 +1172,12 @@ def emit_actor_index(out_dir: Path, state: dict[str, KeyAgg]) -> Path:
     by_skin: dict[str, list] = collections.defaultdict(list)
     by_kind: dict[str, list] = collections.defaultdict(list)
     for key, agg in state.items():
+        # Translate each agg's internal world-keyed actor floors into the
+        # same 1..N emit indices that emit_curated uses.  Without this,
+        # the actor index would surface raw world_ids (32-bit hashes)
+        # in the 'floor' field, breaking any consumer that joins it
+        # against the per-zone JSON's grid.floors map.
+        floor_remap, _ = _build_floor_remap(agg)
         for entry in agg.actors.values():
             row_skin = {
                 'key':    key,
@@ -1049,7 +1185,7 @@ def emit_actor_index(out_dir: Path, state: dict[str, KeyAgg]) -> Path:
                 'x':      entry.x,
                 'y':      entry.y,
                 'z':      entry.z,
-                'floor':  entry.floor,
+                'floor':  floor_remap.get(entry.floor, entry.floor),
                 'sessions_seen': len(entry.sessions_seen),
             }
             by_skin[entry.skin].append(row_skin)
