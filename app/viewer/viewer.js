@@ -225,6 +225,15 @@ const ACTOR_STYLE = {
     // purple) so they pop visually -- when you see one, the surrounding
     // unsampled-cells region is "boss arena" and not "actually unwalkable."
     event_door:              { c: '#c478ff', sym: 'F',  label: 'Event Door' },
+    // Loot items (ground drops).  Color hierarchy mirrors D4's in-game
+    // tooltip colors so users get the same mental model: gold = unique,
+    // orange = legendary, white = everything else.  The Items layer
+    // is default-OFF (see defaultLayerState below) because ground
+    // drops accumulate into starbursts across sessions and clutter
+    // pathing maps -- toggle on when analyzing loot density.
+    item_unique:             { c: '#ffd700', sym: 'U',  label: 'Unique' },
+    item_legendary:          { c: '#ff9020', sym: 'L',  label: 'Legendary' },
+    item:                    { c: '#e6edf3', sym: 'i',  label: 'Item' },
 };
 // ---------------------------------------------------------------------------
 // Layer system -- group actor `kind`s into operator-friendly categories so
@@ -276,6 +285,13 @@ const KIND_CATEGORY = {
     tyrael:                  'npcs',
     bounty_npc:              'npcs',
     mercenary:               'npcs',
+    // Loot items (ground drops -- distinct from chests in the 'loot'
+    // bucket which are clickable containers).  Own category so users
+    // can hide all three sub-kinds together with one toggle without
+    // losing chests/ore/herbs.
+    item:                    'items',
+    item_legendary:          'items',
+    item_unique:             'items',
     // Catch-all
     gizmo:                   'other',
     interactable:            'other',
@@ -290,8 +306,18 @@ const LAYER_CATEGORIES = [
     { id: 'travel',     label: 'Travel',       color: '#cc88ff', desc: 'portals, exits, waypoints' },
     { id: 'objectives', label: 'Objectives',   color: '#88ffaa', desc: 'shrines, pyres, glyphs, pylons' },
     { id: 'npcs',       label: 'NPCs',         color: '#dddd66', desc: 'vendors, mercenary, bounty' },
+    // Items: ground drops (uniques, legendaries, gear bases).  Default
+    // OFF -- per-session drop positions are random so re-playing the
+    // same zone accumulates a starburst that drowns out the static
+    // map.  Toggle on for loot-density / drop-location analysis.
+    { id: 'items',      label: 'Items',        color: '#ffd700', desc: 'ground drops: uniques, legendaries, gear (off by default)' },
     { id: 'other',      label: 'Other',        color: '#888888', desc: 'gizmos, generic interactables' },
 ];
+
+// Layer ids that start hidden on first load.  Subsequent toggles persist
+// to localStorage via the existing layer-state machinery, so a user who
+// turns Items on once doesn't have to redo it every page refresh.
+const DEFAULT_HIDDEN_LAYERS = new Set(['actors_items']);
 
 const PSEUDO_LAYERS = [
     { id: 'walkable_grid',   label: 'Walkable grid',   color: '#3fb950', desc: 'walkable + blocked cells' },
@@ -299,10 +325,15 @@ const PSEUDO_LAYERS = [
     { id: 'path_overlay',    label: 'Path simulator',  color: '#58a6ff', desc: 'A->B path + endpoints' },
 ];
 
-// Default: everything visible.
+// Default: everything visible EXCEPT layers in DEFAULT_HIDDEN_LAYERS
+// (currently 'actors_items' -- ground drops are noisy and most users
+// only want them on for specific analyses).
 function defaultLayerState() {
     const s = {};
-    for (const c of LAYER_CATEGORIES) s['actors_' + c.id] = true;
+    for (const c of LAYER_CATEGORIES) {
+        const id = 'actors_' + c.id;
+        s[id] = !DEFAULT_HIDDEN_LAYERS.has(id);
+    }
     for (const p of PSEUDO_LAYERS)    s[p.id]            = true;
     return s;
 }
