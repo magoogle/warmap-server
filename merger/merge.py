@@ -647,6 +647,49 @@ def is_saturated(agg: KeyAgg) -> tuple[bool, dict]:
 # Output emission
 # ---------------------------------------------------------------------------
 
+def _compute_wall_dist(walkable: list[tuple[int, int]]) -> dict[tuple[int, int], int]:
+    """4-connected BFS from each walkable cell that has at least one
+    non-walkable / unmapped 4-neighbor.  Returns `{(cx, cy): distance}`
+    for every walkable cell; distance 1 = "directly adjacent to a
+    wall", larger = "deeper into the room".
+
+    Mirrors the algorithm in WarPath's core/centerline.lua exactly so
+    the precomputed values are interchangeable with what the plugin
+    used to build locally.  We do it here on the server (Python, runs
+    once per zone per merge cycle) so WarPath can skip the 1.4-second
+    in-Lua BFS on big zones -- it just reads cell[3] directly from
+    the nav file.
+
+    Cost: linear in walkable cell count.  For Hawe_Verge (~620k
+    walkable cells) this is well under a second in CPython.
+    """
+    cell_set = set(walkable)
+    dist: dict[tuple[int, int], int] = {}
+    queue: list[tuple[int, int, int]] = []
+    ADJ = ((1, 0), (-1, 0), (0, 1), (0, -1))
+    # Seed: every walkable cell with at least one non-walkable neighbor
+    # gets distance 1 (it's "on the wall edge").
+    for (cx, cy) in walkable:
+        for dx, dy in ADJ:
+            if (cx + dx, cy + dy) not in cell_set:
+                dist[(cx, cy)] = 1
+                queue.append((cx, cy, 1))
+                break
+    # BFS outward.  Head pointer instead of pop(0) so it stays O(N).
+    head = 0
+    while head < len(queue):
+        cx, cy, d = queue[head]
+        head += 1
+        nd = d + 1
+        for dx, dy in ADJ:
+            nx, ny = cx + dx, cy + dy
+            nk = (nx, ny)
+            if nk in cell_set and nk not in dist:
+                dist[nk] = nd
+                queue.append((nx, ny, nd))
+    return dist
+
+
 def _split_cells_into_clusters(
         cell_map: dict[CellKey, CellAgg],
         grid_resolution: float) -> list[dict[CellKey, CellAgg]]:
@@ -1157,9 +1200,17 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     nav_grid    = dict(payload['grid'])
     nav_floors  = {}
     for fid, cells in cells_out_by_floor.items():
-        # cells row schema: [cx, cy, walkable, conf, total]
-        # nav row schema:   [cx, cy]    (walkable-only assumed)
-        nav_floors[fid] = [[c[0], c[1]] for c in cells if c[2]]
+        # cells row schema (full):   [cx, cy, walkable, conf, total]
+        # nav row schema (this var): [cx, cy, wall_dist]
+        # `wall_dist` is the BFS distance from this walkable cell to
+        # the nearest non-walkable / unmapped cell -- precomputed
+        # server-side so WarPath doesn't have to run a 1.4-second
+        # in-Lua BFS on big zones.  centerline.build_wall_dist on
+        # the plugin side reads cell[3] directly when it sees the
+        # nav_walkable_only format.
+        walkable_pairs = [(c[0], c[1]) for c in cells if c[2]]
+        wd = _compute_wall_dist(walkable_pairs)
+        nav_floors[fid] = [[cx, cy, wd[(cx, cy)]] for (cx, cy) in walkable_pairs]
     nav_grid['floors'] = nav_floors
     nav_payload['grid'] = nav_grid
     # Filter + slim the actors list down to nav destinations.
