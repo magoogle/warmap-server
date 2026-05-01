@@ -835,6 +835,51 @@ def get_zone(key: str, request: Request,
     return _conditional_file_response(p, request, media_type='application/json')
 
 
+@app.get('/zones/{key}/meta')
+@_LIMITER.limit('120/minute')
+def get_zone_meta(key: str, request: Request,
+                  x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    """Slim variant of /zones/{key} -- everything except grid.floors
+    cell data (which dominates file size for big zones).  Consumed by
+    WarPath for fast zone-change loads:  parsing the full file in pure
+    Lua takes ~500ms on big overworld zones (Hawe_Verge) and feels
+    like the game crashed; the meta variant typically parses in
+    <30ms.  WarPath lazy-loads the full file via the regular
+    /zones/{key} endpoint only when wall-distance smoothing is
+    actually needed (rare).
+
+    Format: same JSON schema as /zones/{key} but with
+    grid.floors[fid] = []  (empty per floor).  A `cells_omitted`:true
+    flag is added at the top level so consumers can confirm they got
+    the slim variant.  Per-floor cell counts are surfaced inside
+    grid.floors_meta[fid].cell_count for status-display use.
+    """
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    safe = _safe_filename(key + '.meta.json')
+    if not safe:
+        raise HTTPException(400, 'Bad zone key.')
+    p = DATA_DIR / safe
+    if not p.exists():
+        # Old deploys with no meta files: 404 lets the caller fall
+        # back to /zones/{key} for the full payload.
+        raise HTTPException(404, f'No meta data for zone {key}.')
+
+    accept = (request.headers.get('accept-encoding') or '').lower()
+    if 'gzip' in accept:
+        gz = p.with_suffix('.json.gz')
+        if gz.exists():
+            try:
+                if gz.stat().st_mtime >= p.stat().st_mtime:
+                    return _conditional_file_response(
+                        gz, request,
+                        media_type='application/json',
+                        content_encoding='gzip',
+                    )
+            except OSError:
+                pass
+    return _conditional_file_response(p, request, media_type='application/json')
+
+
 @app.get('/zones')
 @_LIMITER.limit('120/minute')
 def list_zones(request: Request,

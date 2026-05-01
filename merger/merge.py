@@ -1065,6 +1065,43 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
         json.dump(payload, f, indent=None, separators=(',', ':'))
     os.replace(tmp, out_path)
 
+    # ---- Slim "meta" companion (everything EXCEPT grid.floors cells) ----
+    # WarPath's plugin-loader was paying ~500ms parsing the full file on
+    # every zone change in pure Lua, which felt like the game was
+    # crashing on big zones (Hawe_Verge: 619k cells = 12MB JSON).  But
+    # most zone changes never actually USE the cells -- they're only
+    # touched by the lazy wall-distance BFS on the rare smooth_path
+    # call.  Splitting the file lets WarPath load the metadata
+    # synchronously (small, ~300KB max) and lazy-fetch the cells only
+    # when wall_dist is actually needed.
+    #
+    # Meta payload = full payload with grid.floors replaced by an
+    # empty placeholder + per-floor cell_count surfaced inside
+    # floors_meta so consumers can still display "N cells" without
+    # the cells themselves.
+    meta_payload = dict(payload)
+    meta_grid = dict(payload['grid'])
+    meta_floors_meta = {}
+    for fid, fm_entry in (meta_grid.get('floors_meta') or {}).items():
+        new_entry = dict(fm_entry)
+        new_entry['cell_count'] = len(cells_out_by_floor.get(fid) or [])
+        meta_floors_meta[fid] = new_entry
+    meta_grid['floors_meta'] = meta_floors_meta
+    # Empty dict (not removed) so consumers iterating grid.floors don't
+    # KeyError; len() on each value just reports 0 in the meta-only
+    # path.
+    meta_grid['floors'] = {fid: [] for fid in cells_out_by_floor.keys()}
+    meta_payload['grid'] = meta_grid
+    # Marker bit so a consumer reading the meta file knows "cells
+    # weren't included; fetch the full JSON if you actually need them."
+    meta_payload['cells_omitted'] = True
+
+    meta_path = out_dir / f'{_safe_filename(agg.key)}.meta.json'
+    meta_tmp  = meta_path.with_suffix('.json.tmp')
+    with meta_tmp.open('w', encoding='utf-8') as f:
+        json.dump(meta_payload, f, indent=None, separators=(',', ':'))
+    os.replace(meta_tmp, meta_path)
+
     # Also write a pre-compressed companion so /zones/{key} can serve the
     # gzipped bytes directly (Content-Encoding: gzip) without paying the
     # gzip CPU cost on every request.  With multiple uploaders pulling the
@@ -1072,17 +1109,19 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     # the server's CPU.  Pre-compression turns each /zones/{key} response
     # into a static-file read + sendfile -- effectively free.
     import gzip
-    gz_path = out_dir / f'{_safe_filename(agg.key)}.json.gz'
-    gz_tmp  = gz_path.with_suffix('.gz.tmp')
-    with gz_tmp.open('wb') as f:
-        # mtime=0 makes the .gz reproducible (same bytes for same JSON);
-        # avoids spurious If-Modified-Since misses when the JSON content
-        # didn't actually change.  compresslevel=6 is the gzip default
-        # (good size/speed balance).
-        with gzip.GzipFile(fileobj=f, mode='wb', mtime=0, compresslevel=6) as gz:
-            with out_path.open('rb') as src:
-                gz.write(src.read())
-    os.replace(gz_tmp, gz_path)
+    def _gzip_to(src_path: Path, gz_dst: Path) -> None:
+        gz_tmp_local = gz_dst.with_suffix('.gz.tmp')
+        with gz_tmp_local.open('wb') as f:
+            # mtime=0 makes the .gz reproducible (same bytes for same JSON);
+            # avoids spurious If-Modified-Since misses when content
+            # didn't actually change.  compresslevel=6 is the gzip default.
+            with gzip.GzipFile(fileobj=f, mode='wb', mtime=0, compresslevel=6) as gz:
+                with src_path.open('rb') as src:
+                    gz.write(src.read())
+        os.replace(gz_tmp_local, gz_dst)
+
+    _gzip_to(out_path,  out_dir / f'{_safe_filename(agg.key)}.json.gz')
+    _gzip_to(meta_path, out_dir / f'{_safe_filename(agg.key)}.meta.json.gz')
     return out_path
 
 
