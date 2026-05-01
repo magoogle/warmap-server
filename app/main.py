@@ -1195,6 +1195,132 @@ def admin_zone_reset(
     }
 
 
+@app.post('/admin/floor_reset/{key}/{floor}')
+def admin_floor_reset(
+    key: str,
+    floor: int,
+    x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key'),
+):
+    """Quarantine every dump that contributed any data to a specific
+    (zone, floor) pair, then trigger a re-merge.  Lighter alternative
+    to /admin/zone_reset when only one floor is contaminated.
+
+    Real-world trigger: cross-session floor-detection drift in
+    multi-world zones (undercity in particular) where the recorder
+    increments the floor counter on world_id change but different
+    sessions enter the worlds in different orders.  Result: floor 2
+    in zone X1_Undercity_SnakeTemple_01 ends up containing data from
+    both world_02 (correct) AND world_03 (should have been floor 3),
+    so a boss from world_03 appears on what the viewer renders as
+    floor 2.
+
+    What we do:
+      1. Walk all dumps for this zone (header.zone == key).
+      2. For each dump, scan body lines for ANY entry tagged with the
+         target floor (samples, grid_cells, actors, or floor_change
+         events crossing onto/off the target).
+      3. Quarantine the matching dumps wholesale.  Yes, this also
+         drops their other-floor contributions -- pragmatic tradeoff:
+         a single dump's floor data can't be cleanly separated
+         server-side (the floor counter is session-internal), and
+         the user has to re-record the zone anyway to get clean
+         floor labelling.
+      4. Drop the merged JSON, trigger re-merge.
+
+    Reversible: the dumps live in quarantine/ until manually deleted.
+    Move them back to dumps/ + trigger re-merge to restore.
+    """
+    _check_admin(x_warmap_key)
+    if floor < 1 or floor > 99:
+        raise HTTPException(400, 'Bad floor (expected 1..99).')
+    safe_key = _safe_filename(key + '.json')
+    if not safe_key:
+        raise HTTPException(400, 'Bad zone key.')
+
+    # 1. Walk dumps, identify ones touching (zone=key, floor=floor).
+    moved = []
+    scan_errors = 0
+    skipped_no_match = 0
+    for p in DUMPS_DIR.glob('*.ndjson'):
+        try:
+            with open(p, encoding='utf-8') as f:
+                first_line = f.readline()
+                if not first_line:
+                    continue
+                header = json.loads(first_line)
+                if header.get('type') != 'header':
+                    continue
+                zone = header.get('zone')
+                world = header.get('world')
+                if zone != key and world != key:
+                    continue
+                # Header matches the zone -- now scan the body for any
+                # line tagged with the target floor.  We also count
+                # floor_change events with from_floor == target or
+                # to_floor == target so a session that merely crossed
+                # the floor counts (its samples/actors get attributed
+                # to whichever floor was active at the time, which
+                # is what we're trying to invalidate).
+                touches_floor = False
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except (ValueError, json.JSONDecodeError):
+                        continue
+                    fl = obj.get('floor')
+                    if fl == floor:
+                        touches_floor = True
+                        break
+                    # floor_change carries the transition in metadata.
+                    if obj.get('type') == 'event' and obj.get('kind') == 'floor_change':
+                        meta = obj.get('metadata') or {}
+                        if meta.get('from_floor') == floor or meta.get('to_floor') == floor:
+                            touches_floor = True
+                            break
+                if not touches_floor:
+                    skipped_no_match += 1
+                    continue
+            # Out of the with-open block before moving the file.
+            dst = QUARANTINE_DIR / p.name
+            shutil.move(str(p), str(dst))
+            moved.append(p.name)
+            DBI.remove_session(p.name)
+        except (OSError, ValueError, json.JSONDecodeError):
+            scan_errors += 1
+
+    # 2. Drop the merged zone JSON so the next-served version comes
+    # from a fresh merge run (without the quarantined dumps).
+    zone_path = DATA_DIR / safe_key
+    json_existed = zone_path.exists()
+    if json_existed:
+        try:
+            zone_path.unlink()
+        except OSError:
+            pass
+    gz_path = DATA_DIR / (safe_key + '.gz')
+    if gz_path.exists():
+        try:
+            gz_path.unlink()
+        except OSError:
+            pass
+
+    # 3. Trigger a fresh merge.
+    threading.Thread(target=_run_merge, daemon=True).start()
+
+    return {
+        'ok': True,
+        'key':                  key,
+        'floor':                floor,
+        'dumps_quarantined':    moved,
+        'count':                len(moved),
+        'skipped_no_match':     skipped_no_match,
+        'merged_json_deleted':  json_existed,
+        'scan_errors':          scan_errors,
+    }
+
+
 @app.post('/admin/quarantine_uploader/{name}')
 def admin_quarantine_uploader(
     name: str,

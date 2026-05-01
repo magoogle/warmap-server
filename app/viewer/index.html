@@ -221,6 +221,20 @@
                             <button id="reset-zone-go">Reset zone</button>
                         </div>
                         <div id="reset-result" class="mint-result"></div>
+
+                        <p class="muted" style="margin-top:0.8rem">Or clear a single floor when only
+                            part of the zone is bad (e.g. floor 2 of an undercity has world-3 data
+                            leaking into it from a session that mis-counted the floor).
+                            Quarantines dumps that touched that floor only -- other floors stay merged.</p>
+                        <div class="mint-row">
+                            <select id="reset-floor-zone-select" class="reset-zone-select">
+                                <option value="">-- pick a zone --</option>
+                            </select>
+                            <input type="number" id="reset-floor-num" min="1" max="99" step="1"
+                                   placeholder="floor #" style="width:6em" />
+                            <button id="reset-floor-go">Reset floor</button>
+                        </div>
+                        <div id="reset-floor-result" class="mint-result"></div>
                     </section>
                     <section class="admin-section">
                         <h3>Quarantine <span id="quarantine-count" class="muted"></span></h3>

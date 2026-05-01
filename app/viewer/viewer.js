@@ -61,6 +61,10 @@ const D = {
     resetZoneSelect: document.getElementById('reset-zone-select'),
     resetZoneGo:     document.getElementById('reset-zone-go'),
     resetResult:     document.getElementById('reset-result'),
+    resetFloorZoneSelect: document.getElementById('reset-floor-zone-select'),
+    resetFloorNum:        document.getElementById('reset-floor-num'),
+    resetFloorGo:         document.getElementById('reset-floor-go'),
+    resetFloorResult:     document.getElementById('reset-floor-result'),
     quarantineList:  document.getElementById('quarantine-list'),
     quarantineCount: document.getElementById('quarantine-count'),
 };
@@ -2151,11 +2155,16 @@ async function loadResetZoneList() {
         // the viewer is authenticated.
         const d = await getJSON('/zones');
         const zones = (d.zones || []).slice().sort();
-        D.resetZoneSelect.innerHTML =
-            '<option value="">-- pick a zone --</option>' +
+        const opts = '<option value="">-- pick a zone --</option>' +
             zones.map(z => `<option value="${esc(z)}">${esc(z)}</option>`).join('');
+        D.resetZoneSelect.innerHTML      = opts;
+        // Populate the per-floor zone selector from the same list -- the
+        // two controls share zones; dedup the network call by reusing the
+        // response.
+        if (D.resetFloorZoneSelect) D.resetFloorZoneSelect.innerHTML = opts;
     } catch (e) {
         D.resetZoneSelect.innerHTML = `<option value="">(error: ${esc(e.message)})</option>`;
+        if (D.resetFloorZoneSelect) D.resetFloorZoneSelect.innerHTML = D.resetZoneSelect.innerHTML;
     }
 }
 
@@ -2196,6 +2205,56 @@ D.resetZoneGo.addEventListener('click', async () => {
     // Nudge the sidebar so the user sees the deleted zone disappear without
     // waiting for the next auto-refresh tick.
     try { await refreshZoneList(); } catch (_) { /* ignore */ }
+});
+
+// Per-floor reset.  Lighter alternative to the full zone reset above --
+// quarantines only dumps that touched the specified (zone, floor) pair,
+// leaving other floors untouched.  Use case: the recorder's floor
+// counter drifts across sessions in undercity zones, leaking data
+// from the wrong world onto a floor; this lets the admin nuke the
+// bad floor without losing the rest of the zone's mapping.
+if (D.resetFloorGo) D.resetFloorGo.addEventListener('click', async () => {
+    const key   = D.resetFloorZoneSelect.value;
+    const floor = parseInt(D.resetFloorNum.value, 10);
+    if (!key) {
+        D.resetFloorResult.textContent = 'pick a zone first';
+        return;
+    }
+    if (!Number.isFinite(floor) || floor < 1 || floor > 99) {
+        D.resetFloorResult.textContent = 'enter a floor number (1-99)';
+        return;
+    }
+    const ok = confirm(
+        `Reset floor ${floor} of "${key}"?\n\n` +
+        `This will:\n` +
+        `  - quarantine every dump that touched (zone=${key}, floor=${floor})\n` +
+        `  - delete the merged zone JSON\n` +
+        `  - trigger a re-merge so the OTHER floors come back without floor ${floor}\n\n` +
+        `Other floors return as soon as the merge finishes; floor ${floor} stays\n` +
+        `empty until someone re-records the zone.\n\n` +
+        `Continue?`
+    );
+    if (!ok) return;
+    D.resetFloorResult.textContent = 'resetting...';
+    const r = await adminFetch(
+        `/admin/floor_reset/${encodeURIComponent(key)}/${floor}`,
+        { method: 'POST' });
+    if (!r.ok) {
+        D.resetFloorResult.textContent = `error: HTTP ${r.status}`;
+        return;
+    }
+    const d = await r.json();
+    D.resetFloorResult.innerHTML =
+        `<div><b>Reset floor ${esc(String(floor))} of ${esc(key)}</b></div>` +
+        `<div>quarantined ${d.count} dump(s)` +
+            (d.skipped_no_match ? `, skipped ${d.skipped_no_match} (zone match but didn't touch floor ${floor})` : '') +
+            (d.merged_json_deleted ? ', deleted merged JSON' : '') +
+            (d.scan_errors ? `, ${d.scan_errors} dump(s) unreadable` : '') +
+        `</div>` +
+        `<div class="muted">Re-merge running in background.  Refresh in a few seconds.</div>`;
+    await loadResetZoneList();
+    await loadQuarantineList();
+    try { await refreshZoneList(); } catch (_) {}
 });
 
 // ---- Quarantine list ----------------------------------------------------
