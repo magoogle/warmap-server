@@ -1102,6 +1102,40 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
         json.dump(meta_payload, f, indent=None, separators=(',', ':'))
     os.replace(meta_tmp, meta_path)
 
+    # ---- Navigation-only companion (`<key>.nav.json`) -------------------
+    # Tailored for the WarPath plugin's actual needs.  The full file
+    # (used by the viewer) carries per-cell vote metadata (conf, total)
+    # plus blocked cells -- noise from a navigation-runtime POV.
+    # The nav variant strips all of that:
+    #
+    #   * walkable cells only -- non-walkable get dropped entirely
+    #   * each cell encoded as [cx, cy] (no walkable flag, no conf,
+    #     no vote count)
+    #   * floors_meta + actors + zone-level keys (worlds/world_ids/
+    #     activity_kinds/etc.) preserved so WarPath gets everything
+    #     it needs from a single fetch
+    #
+    # Result: ~40-60% smaller than the full JSON, ~10x larger than
+    # the meta variant.  WarPath fetches it instead of the full
+    # .json on its lazy-cells path; viewer keeps using the full
+    # .json so blocked cells render correctly.
+    nav_payload = dict(payload)
+    nav_grid    = dict(payload['grid'])
+    nav_floors  = {}
+    for fid, cells in cells_out_by_floor.items():
+        # cells row schema: [cx, cy, walkable, conf, total]
+        # nav row schema:   [cx, cy]    (walkable-only assumed)
+        nav_floors[fid] = [[c[0], c[1]] for c in cells if c[2]]
+    nav_grid['floors'] = nav_floors
+    nav_payload['grid'] = nav_grid
+    nav_payload['cells_format'] = 'nav_walkable_only'
+
+    nav_path = out_dir / f'{_safe_filename(agg.key)}.nav.json'
+    nav_tmp  = nav_path.with_suffix('.json.tmp')
+    with nav_tmp.open('w', encoding='utf-8') as f:
+        json.dump(nav_payload, f, indent=None, separators=(',', ':'))
+    os.replace(nav_tmp, nav_path)
+
     # Also write a pre-compressed companion so /zones/{key} can serve the
     # gzipped bytes directly (Content-Encoding: gzip) without paying the
     # gzip CPU cost on every request.  With multiple uploaders pulling the
@@ -1122,6 +1156,7 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
 
     _gzip_to(out_path,  out_dir / f'{_safe_filename(agg.key)}.json.gz')
     _gzip_to(meta_path, out_dir / f'{_safe_filename(agg.key)}.meta.json.gz')
+    _gzip_to(nav_path,  out_dir / f'{_safe_filename(agg.key)}.nav.json.gz')
     return out_path
 
 

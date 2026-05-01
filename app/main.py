@@ -866,6 +866,45 @@ def get_zone(key: str, request: Request,
     return _conditional_file_response(p, request, media_type='application/json')
 
 
+@app.get('/zones/{key}/nav')
+@_LIMITER.limit('120/minute')
+def get_zone_nav(key: str, request: Request,
+                 x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    """Navigation-only variant of /zones/{key}, consumed by WarPath
+    when it actually needs cell data (smooth_path / wall-distance
+    BFS).  Strips:
+      * non-walkable cells (only walkable kept)
+      * per-cell vote metadata (conf, total)
+      * leaving each cell as a 2-tuple [cx, cy]
+
+    Result: ~40-60% smaller than the full /zones/{key} payload while
+    carrying everything WarPath needs.  The viewer continues to use
+    the full endpoint since it renders blocked cells too.
+    """
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    safe = _safe_filename(key + '.nav.json')
+    if not safe:
+        raise HTTPException(400, 'Bad zone key.')
+    p = DATA_DIR / safe
+    if not p.exists():
+        raise HTTPException(404, f'No nav data for zone {key}.')
+
+    accept = (request.headers.get('accept-encoding') or '').lower()
+    if 'gzip' in accept:
+        gz = p.with_suffix('.json.gz')
+        if gz.exists():
+            try:
+                if gz.stat().st_mtime >= p.stat().st_mtime:
+                    return _conditional_file_response(
+                        gz, request,
+                        media_type='application/json',
+                        content_encoding='gzip',
+                    )
+            except OSError:
+                pass
+    return _conditional_file_response(p, request, media_type='application/json')
+
+
 @app.get('/zones/{key}/meta')
 @_LIMITER.limit('120/minute')
 def get_zone_meta(key: str, request: Request,
