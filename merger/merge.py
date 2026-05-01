@@ -1128,14 +1128,20 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     # Count clusters per world_key so we know which entries are splits.
     clusters_per_wkey: dict[int, int] = collections.Counter(f.world_key for f in floors)
     for emit_idx, f in enumerate(floors, start=1):
+        # cell_count = WALKABLE-cell count.  Counting walkable instead
+        # of total (walkable + blocked) means status displays show the
+        # number that's actually navigable, and matches what nav.json
+        # ships in floors[fid].  WarPath's "X cells" status line is
+        # the primary consumer.  full.json's cell_count is technically
+        # higher (includes blocked) but a full-file consumer can
+        # always count grid.floors[fid] directly if it cares.
+        full_floor_cells = cells_out_by_floor.get(str(emit_idx)) or []
+        walkable_count = sum(1 for c in full_floor_cells if c[2])
         entry = {
             'worlds':     sorted(f.worlds),
             'world_ids':  sorted(f.world_ids),
             'sessions':   len(f.sessions),
-            # cell_count surfaced here (not just on the meta variant)
-            # so every payload (full / nav / meta / links) carries the
-            # same per-floor count for status displays / sanity checks.
-            'cell_count': len(cells_out_by_floor.get(str(emit_idx)) or []),
+            'cell_count': walkable_count,
         }
         if clusters_per_wkey[f.world_key] > 1:
             # Diagnostic: this is one of N split clusters of a single
