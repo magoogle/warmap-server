@@ -503,6 +503,10 @@ def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
             _merge_actor(agg.actors, a, rec.session_id, floor_keys.get(f, _resolve_floor_key(rec, f)))
         touched.append(key)
 
+    else:
+        # Unknown activity kind -- skip.
+        return []
+
     # ---- Zone-link breadcrumb -----------------------------------------
     # Recorder stamps `entered_via` into the new record's header at zone
     # change time -- "I came from zone X via actor Y at coords (a, b)".
@@ -511,17 +515,10 @@ def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
     # X's outbound_links here regardless of whether X's KeyAgg already
     # exists -- _get_or_create makes one as needed; if no actual record
     # for X has merged yet the outbound_links are the only contribution
-    # and that's still useful data.  Pit / pit_world records don't
-    # carry zone-link breadcrumbs; this branch only fires when
-    # rec.entered_via is set.
+    # and that's still useful data.
     ev = rec.entered_via
     if ev and ev.get('from_zone') and ev.get('actor_skin'):
         from_key  = ev['from_zone']
-        # The from-zone could be of either key_type (zone or pit_world).
-        # We don't know without checking state; default to 'zone' for
-        # _get_or_create when missing -- pit_world records always have
-        # an existing agg by the time their outbound link could be
-        # observed (you have to BE in pit X to leave it).
         from_agg  = state.get(from_key) or _get_or_create(state, from_key, 'zone')
         link_key  = (
             ev.get('actor_skin'),
@@ -555,10 +552,6 @@ def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
             # Make sure from-zone gets re-emitted on this cycle so its
             # links.json reflects the new edge (or new count).
             touched.append(from_key)
-
-    else:
-        # Unknown activity kind -- skip.
-        return []
 
     # Log a snapshot of cell counts for saturation tracking.
     for key in touched:
