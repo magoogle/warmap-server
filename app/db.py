@@ -246,6 +246,46 @@ class DB:
     # ============================================================
     def upsert_session(self, **kw) -> None:
         kw.setdefault('received_at', time.time())
+
+        # Re-upload throttle: a buggy / over-eager client uploader that
+        # keeps re-shipping a partial that's no longer being written
+        # (e.g. the recorder crashed without writing a footer; the
+        # uploader's local state was lost and it doesn't know we
+        # already have it) would otherwise refresh `mtime` to "now"
+        # every cycle, and the /live-zones staleness filter (cutoff
+        # last_active >= now-300s) never drops the row.  Result: a
+        # zone shows LIVE x3 even when only one person is actually
+        # there -- the other two "uploaders" are just rebroadcasting
+        # ancient abandoned partials.
+        #
+        # Fix: if a row already exists for this dump name AND the new
+        # upload didn't represent real progress (size unchanged,
+        # sample_count unchanged, not newly complete), preserve the
+        # existing mtime instead of bumping it.  That way the
+        # staleness filter eventually drops the row from /live-zones
+        # regardless of how aggressively a misbehaving uploader
+        # re-ships it.
+        prev_row = self.query_one(
+            'SELECT mtime, size, sample_count, complete FROM sessions WHERE name = ?',
+            (kw.get('name'),)
+        )
+        prev = dict(prev_row) if prev_row else None
+        if prev is not None:
+            new_size      = kw.get('size', 0)         or 0
+            new_samples   = kw.get('sample_count', 0) or 0
+            new_complete  = bool(kw.get('complete'))
+            old_size      = prev.get('size', 0)         or 0
+            old_samples   = prev.get('sample_count', 0) or 0
+            old_complete  = bool(prev.get('complete'))
+            progressed = (new_size > old_size
+                          or new_samples > old_samples
+                          or (new_complete and not old_complete))
+            if not progressed:
+                # Pin mtime to the previous value -- everything else
+                # that depends on file content is identical anyway
+                # (same size + same sample count == same content).
+                kw['mtime'] = prev.get('mtime')
+
         cols = ['name','client_id','session_id','zone','world','activity',
                 'started_at','ended_at','last_sample_t','last_x','last_y',
                 'last_z','last_floor','sample_count','cell_count','actor_count',
