@@ -740,16 +740,28 @@ def health():
 @app.get('/status')
 def status():
     dumps = sorted(DUMPS_DIR.glob('*.ndjson')) + sorted(DUMPS_DIR.glob('*.json'))
-    zones = sorted(DATA_DIR.glob('*.json'))
+    # Count canonical zone files only -- exclude the .meta.json /
+    # .nav.json / .links.json / .gz variants so zones_count matches
+    # the actual zone catalog size, not the file count.  A zone is
+    # "canonical" if its name has no extra dotted suffix and isn't
+    # one of the special index files (coverage, _actor_index, etc.).
+    canonical_zones = [
+        z for z in DATA_DIR.glob('*.json')
+        if not z.name.startswith('_')
+        and not z.name.endswith('.meta.json')
+        and not z.name.endswith('.nav.json')
+        and not z.name.endswith('.links.json')
+        and z.stem not in ('coverage',)
+    ]
     return {
         'dumps_count':  len(dumps),
-        'zones_count':  len([z for z in zones if not z.name.startswith('_')]),
+        'zones_count':  len(canonical_zones),
         # Read from disk-shared copy so non-scheduler workers also have
         # a fresh last-merge timestamp -- otherwise /status flickered
         # between 'X s ago' (scheduler worker) and 'never' (everyone
         # else) depending on which worker handled the request.
         'last_merge':   _read_last_merge(),
-        'sample_zones': [z.stem for z in zones if not z.name.startswith('_')][:20],
+        'sample_zones': [z.stem for z in canonical_zones][:20],
     }
 
 
@@ -991,8 +1003,17 @@ def get_zone_meta(key: str, request: Request,
 def list_zones(request: Request,
                x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
     _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
-    zones = sorted(DATA_DIR.glob('*.json'))
-    return {'zones': [z.stem for z in zones if not z.name.startswith('_')]}
+    # Exclude the variant suffixes (.meta.json, .nav.json, .links.json)
+    # so the zone listing reflects the actual zone catalog, not the
+    # 4-files-per-zone disk layout.
+    zones = sorted(
+        z for z in DATA_DIR.glob('*.json')
+        if not z.name.startswith('_')
+        and not z.name.endswith('.meta.json')
+        and not z.name.endswith('.nav.json')
+        and not z.name.endswith('.links.json')
+    )
+    return {'zones': [z.stem for z in zones]}
 
 
 # ---------------------------------------------------------------------------
