@@ -866,6 +866,42 @@ def get_zone(key: str, request: Request,
     return _conditional_file_response(p, request, media_type='application/json')
 
 
+@app.get('/zones/{key}/links')
+@_LIMITER.limit('120/minute')
+def get_zone_links(key: str, request: Request,
+                   x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    """Outbound zone-link graph for one merge key.  Returns the list
+    of "from this zone, you can reach <to_zone> via <actor> at
+    <coords>" edges that the merger built from header.entered_via
+    breadcrumbs across every session that left this zone.
+
+    Slim payload (no cells, no actor catalog).  Cross-zone navigation
+    planners can fetch this per-step on a route without pulling the
+    full nav/meta files."""
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    safe = _safe_filename(key + '.links.json')
+    if not safe:
+        raise HTTPException(400, 'Bad zone key.')
+    p = DATA_DIR / safe
+    if not p.exists():
+        raise HTTPException(404, f'No link data for zone {key}.')
+
+    accept = (request.headers.get('accept-encoding') or '').lower()
+    if 'gzip' in accept:
+        gz = p.with_suffix('.json.gz')
+        if gz.exists():
+            try:
+                if gz.stat().st_mtime >= p.stat().st_mtime:
+                    return _conditional_file_response(
+                        gz, request,
+                        media_type='application/json',
+                        content_encoding='gzip',
+                    )
+            except OSError:
+                pass
+    return _conditional_file_response(p, request, media_type='application/json')
+
+
 @app.get('/zones/{key}/nav')
 @_LIMITER.limit('120/minute')
 def get_zone_nav(key: str, request: Request,

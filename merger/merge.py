@@ -122,6 +122,13 @@ class Record:
     actors: list[dict]
     grid_cells_by_floor: dict[int, list[tuple[int, int, int]]]   # floor -> [(cx, cy, w)]
     grid_resolution: float
+    # Zone-link breadcrumb: how the player got to THIS zone.  The
+    # recorder writes header.entered_via on zone-change transitions
+    # when it can heuristically identify the source actor (a portal /
+    # dungeon entrance / waypoint within ~5m of the player's last
+    # position before the transition).  Server-side aggregation turns
+    # these into a per-zone outbound link table.
+    entered_via: Optional[dict] = None
 
     @property
     def duration_s(self) -> int:
@@ -237,6 +244,7 @@ def parse_ndjson(path: Path) -> Optional[Record]:
         actors=actors,
         grid_cells_by_floor=dict(grid),
         grid_resolution=grid_resolution,
+        entered_via=header.get('entered_via'),
     )
 
 
@@ -366,6 +374,18 @@ class KeyAgg:
     # Saturation tracking: history of cells_total after each session merge
     cells_history: list[tuple[int, int]] = field(default_factory=list)
                                                     # [(unix_ts, cells_total), ...]
+    # Outbound zone-link graph.  An "outbound link" answers "where
+    # can I go FROM this zone?" -- a record for zone B with
+    # entered_via.from_zone == A creates an outbound link on A's
+    # KeyAgg with destination=B.  Built incrementally from
+    # `header.entered_via` breadcrumbs across every session.
+    # Key: (source_actor_skin, rounded source_x, rounded source_y,
+    # to_zone) -- so the same portal at the same coords leading to
+    # the same destination dedupes to one edge.  Value: dict with
+    # count, first_seen, last_seen, source actor coords + sno_id
+    # + kind, destination zone.  Surfaced via the new
+    # /zones/{key}/links endpoint.
+    outbound_links: dict[tuple, dict] = field(default_factory=dict)
 
 
 def _resolve_floor_key(rec: Record, floor_idx: int) -> int:
@@ -482,6 +502,59 @@ def merge_record_into(state: dict[str, KeyAgg], rec: Record) -> list[str]:
             f = a.get('floor', 1)
             _merge_actor(agg.actors, a, rec.session_id, floor_keys.get(f, _resolve_floor_key(rec, f)))
         touched.append(key)
+
+    # ---- Zone-link breadcrumb -----------------------------------------
+    # Recorder stamps `entered_via` into the new record's header at zone
+    # change time -- "I came from zone X via actor Y at coords (a, b)".
+    # That breadcrumb belongs as an OUTBOUND link on zone X's KeyAgg
+    # (it's how to LEAVE X, not how to enter the new zone).  We populate
+    # X's outbound_links here regardless of whether X's KeyAgg already
+    # exists -- _get_or_create makes one as needed; if no actual record
+    # for X has merged yet the outbound_links are the only contribution
+    # and that's still useful data.  Pit / pit_world records don't
+    # carry zone-link breadcrumbs; this branch only fires when
+    # rec.entered_via is set.
+    ev = rec.entered_via
+    if ev and ev.get('from_zone') and ev.get('actor_skin'):
+        from_key  = ev['from_zone']
+        # The from-zone could be of either key_type (zone or pit_world).
+        # We don't know without checking state; default to 'zone' for
+        # _get_or_create when missing -- pit_world records always have
+        # an existing agg by the time their outbound link could be
+        # observed (you have to BE in pit X to leave it).
+        from_agg  = state.get(from_key) or _get_or_create(state, from_key, 'zone')
+        link_key  = (
+            ev.get('actor_skin'),
+            int(round(ev.get('actor_x') or 0)),
+            int(round(ev.get('actor_y') or 0)),
+            rec.zone,
+        )
+        link = from_agg.outbound_links.get(link_key)
+        started = rec.started_at or int(time.time())
+        if not link:
+            link = {
+                'to_zone':       rec.zone,
+                'to_world':      rec.world,
+                'to_world_id':   rec.world_id,
+                'actor_skin':    ev.get('actor_skin'),
+                'actor_kind':    ev.get('actor_kind'),
+                'actor_sno':     ev.get('actor_sno'),
+                'actor_type_id': ev.get('actor_type_id'),
+                'actor_x':       ev.get('actor_x'),
+                'actor_y':       ev.get('actor_y'),
+                'actor_z':       ev.get('actor_z'),
+                'actor_floor':   ev.get('actor_floor'),
+                'first_seen':    started,
+                'last_seen':     started,
+                'count':         0,
+            }
+            from_agg.outbound_links[link_key] = link
+        link['count']    += 1
+        link['last_seen'] = max(link['last_seen'] or 0, started)
+        if from_key not in touched:
+            # Make sure from-zone gets re-emitted on this cycle so its
+            # links.json reflects the new edge (or new count).
+            touched.append(from_key)
 
     else:
         # Unknown activity kind -- skip.
@@ -1075,6 +1148,17 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
             entry['split_idx'] = f.cluster_idx + 1
         floors_meta_out[str(emit_idx)] = entry
 
+    # Outbound-link list: the per-edge dicts populated during
+    # merge_record_into.  Sort by (count desc, to_zone asc) so the
+    # most-trafficked exits are first -- a navigation planner can
+    # take that as a confidence signal ("this edge was observed N
+    # times across sessions => it's a real, reachable transition,
+    # not noise from a one-off teleport bug").
+    outbound_links_out = sorted(
+        agg.outbound_links.values(),
+        key=lambda l: (-(l.get('count') or 0), l.get('to_zone') or ''),
+    )
+
     payload = {
         'schema_version': SCHEMA_VERSION_SUPPORTED,
         'key':       agg.key,
@@ -1090,6 +1174,10 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
         # across its floors.
         'worlds':           sorted(agg.worlds),
         'world_ids':        sorted(agg.world_ids),
+        # Outbound-link graph: "from this zone, where can the player
+        # go and via which actor?"  Built from header.entered_via
+        # breadcrumbs across every session that ever LEFT this zone.
+        'outbound_links':   outbound_links_out,
         'grid': {
             'resolution': agg.grid_resolution,
             'bbox': bbox,
@@ -1144,6 +1232,23 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     with meta_tmp.open('w', encoding='utf-8') as f:
         json.dump(meta_payload, f, indent=None, separators=(',', ':'))
     os.replace(meta_tmp, meta_path)
+
+    # ---- Standalone outbound-link graph (`<key>.links.json`) -----------
+    # Just the from-zone identity + outbound links list, slim enough
+    # for a navigation planner to fetch one-per-zone-per-route-step
+    # without pulling cells/actors metadata.  Served by /zones/{key}/links.
+    links_payload = {
+        'schema_version': SCHEMA_VERSION_SUPPORTED,
+        'key':            agg.key,
+        'key_type':       agg.key_type,
+        'merged_at':      payload['merged_at'],
+        'outbound_links': outbound_links_out,
+    }
+    links_path = out_dir / f'{_safe_filename(agg.key)}.links.json'
+    links_tmp  = links_path.with_suffix('.json.tmp')
+    with links_tmp.open('w', encoding='utf-8') as f:
+        json.dump(links_payload, f, indent=None, separators=(',', ':'))
+    os.replace(links_tmp, links_path)
 
     # ---- Navigation-only companion (`<key>.nav.json`) -------------------
     # Tailored for the WarPath plugin's actual needs.  The full file
@@ -1203,11 +1308,14 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
         # cells row schema (full):   [cx, cy, walkable, conf, total]
         # nav row schema (this var): [cx, cy, wall_dist]
         # `wall_dist` is the BFS distance from this walkable cell to
-        # the nearest non-walkable / unmapped cell -- precomputed
-        # server-side so WarPath doesn't have to run a 1.4-second
-        # in-Lua BFS on big zones.  centerline.build_wall_dist on
-        # the plugin side reads cell[3] directly when it sees the
-        # nav_walkable_only format.
+        # the nearest non-walkable / unmapped cell.  Pre-computed
+        # server-side (see _compute_wall_dist) so WarPath never has
+        # to run an in-Lua BFS even on big zones.
+        #
+        # Tried parallel-arrays { cxs:[], cys:[], wds:[] } -- came
+        # out 3% LARGER because per-tuple bracket compression beats
+        # per-element commas + array scaffolding.  Stuck with the
+        # tuple form.
         walkable_pairs = [(c[0], c[1]) for c in cells if c[2]]
         wd = _compute_wall_dist(walkable_pairs)
         nav_floors[fid] = [[cx, cy, wd[(cx, cy)]] for (cx, cy) in walkable_pairs]
@@ -1247,9 +1355,10 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
                     gz.write(src.read())
         os.replace(gz_tmp_local, gz_dst)
 
-    _gzip_to(out_path,  out_dir / f'{_safe_filename(agg.key)}.json.gz')
-    _gzip_to(meta_path, out_dir / f'{_safe_filename(agg.key)}.meta.json.gz')
-    _gzip_to(nav_path,  out_dir / f'{_safe_filename(agg.key)}.nav.json.gz')
+    _gzip_to(out_path,   out_dir / f'{_safe_filename(agg.key)}.json.gz')
+    _gzip_to(meta_path,  out_dir / f'{_safe_filename(agg.key)}.meta.json.gz')
+    _gzip_to(nav_path,   out_dir / f'{_safe_filename(agg.key)}.nav.json.gz')
+    _gzip_to(links_path, out_dir / f'{_safe_filename(agg.key)}.links.json.gz')
     return out_path
 
 
