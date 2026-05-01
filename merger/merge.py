@@ -1129,9 +1129,13 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     clusters_per_wkey: dict[int, int] = collections.Counter(f.world_key for f in floors)
     for emit_idx, f in enumerate(floors, start=1):
         entry = {
-            'worlds':    sorted(f.worlds),
-            'world_ids': sorted(f.world_ids),
-            'sessions':  len(f.sessions),
+            'worlds':     sorted(f.worlds),
+            'world_ids':  sorted(f.world_ids),
+            'sessions':   len(f.sessions),
+            # cell_count surfaced here (not just on the meta variant)
+            # so every payload (full / nav / meta / links) carries the
+            # same per-floor count for status displays / sanity checks.
+            'cell_count': len(cells_out_by_floor.get(str(emit_idx)) or []),
         }
         if clusters_per_wkey[f.world_key] > 1:
             # Diagnostic: this is one of N split clusters of a single
@@ -1205,15 +1209,10 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     # the cells themselves.
     meta_payload = dict(payload)
     meta_grid = dict(payload['grid'])
-    meta_floors_meta = {}
-    for fid, fm_entry in (meta_grid.get('floors_meta') or {}).items():
-        new_entry = dict(fm_entry)
-        new_entry['cell_count'] = len(cells_out_by_floor.get(fid) or [])
-        meta_floors_meta[fid] = new_entry
-    meta_grid['floors_meta'] = meta_floors_meta
     # Empty dict (not removed) so consumers iterating grid.floors don't
     # KeyError; len() on each value just reports 0 in the meta-only
-    # path.
+    # path.  cell_count for the status display is already in
+    # floors_meta (added in the shared payload-building loop above).
     meta_grid['floors'] = {fid: [] for fid in cells_out_by_floor.keys()}
     meta_payload['grid'] = meta_grid
     # Marker bit so a consumer reading the meta file knows "cells
