@@ -26,8 +26,16 @@ services:
     #     -> HAProxy frontend (Host: d4data.live SNI check)
     #       -> HAProxy backend (HTTP, LAN-internal)
     #         -> <on-prem>:8000  (this server, any LAN interface)
+    # Two LAN ports:
+    #   30100 = public upload + read API (auth required for writes)
+    #   30101 = same app, exposed for the live viewer; UFW restricts
+    #           this port to the operator's IP so the viewer doesn't
+    #           need its own auth.
+    # If you migrate to an on-prem box behind pfSense+HAProxy you can
+    # collapse to a single 8000:8000 mapping.
     ports:
-      - "8000:8000"
+      - "30100:8000"
+      - "30101:8000"
 
     environment:
       WARMAP_API_KEY:           ${WARMAP_API_KEY:?missing WARMAP_API_KEY}
@@ -37,10 +45,11 @@ services:
       # friends play.  Bump to 60+ if you ever migrate back to a small VPS.
       WARMAP_MERGE_INTERVAL_S: "30"
       WARMAP_ROOT:             "/data"
-      # Use the on-prem hardware properly.  16 cores -> 12 uvicorn
-      # workers (leave a few for the OS / merger / docker-proxy).  Box
-      # has 30 GB RAM so worker memory ceiling is never the constraint.
-      WARMAP_WORKERS:          "12"
+      # Sized for the small VPS (3 vCPU / 3.7 GB / no swap).  More than
+      # ~3 workers and the box thrashes under merge load -- workers get
+      # OOM-killed mid-rebuild and the merge never converges.  Bump
+      # back up if you migrate to bigger hardware.
+      WARMAP_WORKERS:          "3"
 
     volumes:
       - warmap-data:/data
