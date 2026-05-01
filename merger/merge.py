@@ -1296,8 +1296,19 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
         # Town infrastructure
         'stash', 'gizmo',
     }
+    # Pit-specific filter: pit_world records have RANDOMLY-positioned
+    # bosses + floor portals that change every run, so storing them
+    # in the static catalog is misleading -- the position the merger
+    # records is just where one player happened to find them last.
+    # Kept for pit_world: dungeon_entrance (entry portal + next-level
+    # markers; same kind appears twice on intermediate floors --
+    # one in, one out, both useful), pit_exit (clickable level switch),
+    # traversal (jumps), pit_obelisk (zone-key crafter).
+    PIT_NAV_DROP = {'boss', 'pit_floor_portal'}
     NAV_ACTOR_FIELDS = ('skin', 'kind', 'sno_id', 'type_id',
                         'x', 'y', 'z', 'floor')
+
+    is_pit_world = (agg.key_type == 'pit_world')
 
     nav_payload = dict(payload)
     nav_grid    = dict(payload['grid'])
@@ -1319,10 +1330,18 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
         nav_floors[fid] = [[cx, cy, wd[(cx, cy)]] for (cx, cy) in walkable_pairs]
     nav_grid['floors'] = nav_floors
     nav_payload['grid'] = nav_grid
-    # Filter + slim the actors list down to nav destinations.
+    # Filter + slim the actors list down to nav destinations.  Pit
+    # worlds get an extra subtraction: random-spawn entities (boss,
+    # pit_floor_portal) get dropped because their positions are
+    # session-specific noise -- the player finds them wherever, the
+    # merger averages those positions across runs into something
+    # meaningless for navigation.
     nav_actors = []
     for a in actors_out:
-        if a.get('kind') not in NAV_ACTOR_KINDS:
+        kind = a.get('kind')
+        if kind not in NAV_ACTOR_KINDS:
+            continue
+        if is_pit_world and kind in PIT_NAV_DROP:
             continue
         slim = {k: a[k] for k in NAV_ACTOR_FIELDS if k in a}
         nav_actors.append(slim)
