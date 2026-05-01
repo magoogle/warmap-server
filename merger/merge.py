@@ -647,65 +647,240 @@ def is_saturated(agg: KeyAgg) -> tuple[bool, dict]:
 # Output emission
 # ---------------------------------------------------------------------------
 
-def _build_floor_remap(agg: KeyAgg) -> tuple[dict[int, int], list[int]]:
-    """Pick a deterministic 1..N emit-floor ordering for one KeyAgg's
-    internal world-keyed buckets.  Returns (floor_remap, sorted_keys).
+def _split_cells_into_clusters(
+        cell_map: dict[CellKey, CellAgg],
+        grid_resolution: float) -> list[dict[CellKey, CellAgg]]:
+    """Split a single per-world cell bucket into spatially-disjoint
+    sub-buckets (one per physical room).
 
-    Sort by representative world NAME alphabetically -- D4 conventions
-    like X1_Undercity_SnakeTemple_01/_02/_03 already encode logical
-    order, so alpha-sort gives the right floor numbers without us
-    having to invent a per-zone schema.  World_ids without any known
-    name fall back to numeric sort; legacy negative keys (sentinel for
-    older dumps that lacked to_world_id) sort last in their original
-    index order.
+    Why: the host returns the same world_id for some sub-areas of a
+    larger zone (notably undercity hub rooms vs their boss-room
+    sub-areas reachable via portal -- e.g. BugCave_03's two
+    physically-separate rooms both report world_id=4201036991).  The
+    recorder's floor counter eventually catches this via the
+    teleport-distance heuristic, but the resulting floor_change
+    events still tag both rooms with the same to_world_id, so the
+    merger's per-world keying collapses them back into one bucket
+    with cells from two different physical spaces.
 
-    Used by emit_curated for the per-zone JSON and by emit_actor_index
-    for the universal index -- both must agree on which world becomes
-    floor N or actor entries land on inconsistent floor numbers
-    between the two outputs.
+    This pass runs at emit time (not merge time) so it operates on
+    fully-aggregated cells across every contributing session, then
+    splits if the cells form 2+ disjoint clusters.
+
+    Algorithm: flood-fill on a coarse super-grid where each
+    super-cell is BUCKET_CELLS x BUCKET_CELLS real cells.  Two
+    super-cells are connected when adjacent (4-connectivity) AND
+    both contain at least one cell.  Disjoint super-cell components
+    => disjoint physical rooms.  Tuned so that BugCave's 5km gap
+    between rooms always splits while a single room with
+    ~few-hundred-cell gaps from unwalked corners stays unified.
+
+    Returns a list of cell_map dicts in deterministic order
+    (smallest-min-x cluster first).  Single-cluster input returns a
+    one-element list with the original dict.
     """
-    def _world_sort_key(world_key: int) -> tuple:
-        meta = agg.floors_meta.get(world_key)
-        names = meta.worlds if meta else None
-        if names:
-            # Bucket 0: worlds we know the name of -- alphabetical wins
-            return (0, sorted(names)[0])
-        if world_key < 0:
-            # Bucket 1: legacy floor-idx fallback, preserve original
-            # session-local order so older single-floor zones don't
-            # get reshuffled.
-            return (1, -world_key)
-        # Bucket 2: world_id we have but no name for; sort numerically.
-        return (2, world_key)
+    if not cell_map:
+        return [cell_map]
+    # 50 cells * 0.5m/cell = 25m per super-cell.  Two clusters at
+    # 100m+ separation always split; a single room with random
+    # unwalked gaps (typical 5-15m) stays together via 4-adjacency.
+    BUCKET_CELLS = 50
 
+    # Index cells by their super-cell coordinate.
+    buckets: dict[tuple[int, int], list[CellKey]] = collections.defaultdict(list)
+    for ck in cell_map:
+        cx, cy = ck
+        # Floor-divide for negative coords: Python's // already does
+        # mathematical floor (cx=-5 with BUCKET=50 -> -1, correct).
+        bx, by = cx // BUCKET_CELLS, cy // BUCKET_CELLS
+        buckets[(bx, by)].append(ck)
+
+    if len(buckets) == 1:
+        return [cell_map]
+
+    # Flood-fill connected components of super-cells.
+    bucket_keys = set(buckets.keys())
+    visited: set[tuple[int, int]] = set()
+    components: list[set[tuple[int, int]]] = []
+    for start in bucket_keys:
+        if start in visited:
+            continue
+        component: set[tuple[int, int]] = set()
+        stack = [start]
+        while stack:
+            b = stack.pop()
+            if b in visited:
+                continue
+            visited.add(b)
+            component.add(b)
+            bx, by = b
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                neighbor = (bx + dx, by + dy)
+                if neighbor in bucket_keys and neighbor not in visited:
+                    stack.append(neighbor)
+        components.append(component)
+
+    if len(components) <= 1:
+        return [cell_map]
+
+    # Build sub-cell-maps from the components, keep only what's in
+    # this component's super-cells.
+    sub_maps: list[dict[CellKey, CellAgg]] = []
+    for comp in components:
+        sub: dict[CellKey, CellAgg] = {}
+        for b in comp:
+            for ck in buckets[b]:
+                sub[ck] = cell_map[ck]
+        sub_maps.append(sub)
+
+    # Deterministic order: smallest-min-x cluster first.  Stable
+    # across re-merges so emit floor numbers don't jiggle.
+    sub_maps.sort(key=lambda m: min(ck[0] for ck in m))
+    return sub_maps
+
+
+@dataclass
+class _LogicalFloor:
+    """One emit floor.  May correspond 1:1 with an internal world_key
+    (the common case) or may be one of N split clusters of a single
+    world_key (when same-world-id rooms got mashed into one bucket
+    by the recorder's floor counter)."""
+    world_key:    int                          # source bucket key (world_id or sentinel)
+    cluster_idx:  int                          # 0 when no split, 0..N-1 when split
+    cells:        dict[CellKey, CellAgg]       # cells belonging to this floor
+    worlds:       set[str]                     # source FloorMetaAgg.worlds
+    world_ids:    set[int]                     # source FloorMetaAgg.world_ids
+    sessions:     set[str]                     # source FloorMetaAgg.sessions
+    cell_x_range: tuple[int, int] = (0, 0)     # for actor placement bbox check
+
+
+def _build_floor_layout(agg: KeyAgg) -> list[_LogicalFloor]:
+    """Compute the ordered list of emit floors for a KeyAgg.
+
+    1. For each internal world_key bucket, run cluster-split.  Most
+       buckets produce one cluster; the bug-fix targets the few that
+       produce multiple (same-world-id rooms physically separated).
+    2. Each cluster becomes one _LogicalFloor.
+    3. Order: by representative world name alpha (D4's NN suffixes
+       sort logically), then by cluster's leftmost cell-x (so split
+       rooms within the same world also sort deterministically).
+       Worlds-without-names + legacy-sentinel keys sort last,
+       preserving the prior behavior for old dumps.
+
+    The returned list is the canonical emit ordering -- the index
+    in the list is the emit floor number minus 1.  Both emit_curated
+    and emit_actor_index use this so per-zone JSON and the universal
+    actor index agree on floor numbers.
+    """
+    # Collect every key that contributes anything (cells, meta, or actors).
     all_keys = set(agg.cells_by_floor.keys()) | set(agg.floors_meta.keys())
     for a in agg.actors.values():
         all_keys.add(a.floor)
-    sorted_keys = sorted(all_keys, key=_world_sort_key)
-    return ({wk: idx for idx, wk in enumerate(sorted_keys, start=1)}, sorted_keys)
+
+    floors: list[_LogicalFloor] = []
+    for wkey in all_keys:
+        cells = agg.cells_by_floor.get(wkey) or {}
+        fm    = agg.floors_meta.get(wkey, FloorMetaAgg())
+        clusters = _split_cells_into_clusters(cells, agg.grid_resolution)
+        for ci, sub_map in enumerate(clusters):
+            xs = [ck[0] for ck in sub_map] if sub_map else [0]
+            floors.append(_LogicalFloor(
+                world_key=wkey,
+                cluster_idx=ci,
+                cells=sub_map,
+                worlds=set(fm.worlds),
+                world_ids=set(fm.world_ids),
+                sessions=set(fm.sessions),
+                cell_x_range=(min(xs), max(xs)),
+            ))
+
+    def _sort_key(f: _LogicalFloor) -> tuple:
+        if f.worlds:
+            # Bucket 0: named worlds, alpha-sorted; cluster_idx breaks ties.
+            return (0, sorted(f.worlds)[0], f.cell_x_range[0])
+        if f.world_key < 0:
+            # Bucket 1: legacy floor-idx fallback, preserve session-local order.
+            return (1, -f.world_key, f.cell_x_range[0])
+        # Bucket 2: world_id without a known name -- numeric.
+        return (2, f.world_key, f.cell_x_range[0])
+
+    floors.sort(key=_sort_key)
+    return floors
+
+
+def _build_actor_floor_lookup(
+        floors: list[_LogicalFloor],
+        grid_resolution: float) -> dict[tuple[int, int, int], int]:
+    """Map (rounded_cx, rounded_cy, world_key) -> emit_idx for actor
+    placement.  Only meaningful when a world_key got split into 2+
+    clusters; for single-cluster floors all actors land on the same
+    emit_idx anyway.
+
+    We index by cell coord rather than by raw (x, y) so an actor's
+    position rounds into the same cell as the surrounding walkable
+    cells -- otherwise nearby-but-not-on-a-cell positions would
+    miss their cluster.
+    """
+    lookup: dict[tuple[int, int, int], int] = {}
+    for emit_idx, f in enumerate(floors, start=1):
+        for (cx, cy) in f.cells:
+            lookup[(cx, cy, f.world_key)] = emit_idx
+    return lookup
+
+
+def _emit_floor_for_actor(
+        a: ActorAgg,
+        floors: list[_LogicalFloor],
+        actor_lookup: dict[tuple[int, int, int], int],
+        grid_resolution: float) -> int:
+    """Resolve an actor's emit floor.  Look up its cell first; on
+    miss (actor sitting in an unwalked-cell tile, or a coord that
+    rounded just outside any cluster's cells), fall back to nearest-
+    cluster-by-x within the same world_key."""
+    cx = round(a.x / grid_resolution)
+    cy = round(a.y / grid_resolution)
+    direct = actor_lookup.get((cx, cy, a.floor))
+    if direct is not None:
+        return direct
+    # Fallback: among floors with the same world_key, pick the one whose
+    # cell-x range contains the actor's cx (or is closest to it).
+    candidates = [(i + 1, f) for i, f in enumerate(floors) if f.world_key == a.floor]
+    if not candidates:
+        # No matching world_key (e.g. actor on a floor with no cells at all).
+        # Just pick floor 1 -- guaranteed a sane number, won't break the JSON.
+        return 1
+    best_emit = candidates[0][0]
+    best_dist = abs(cx - candidates[0][1].cell_x_range[0])
+    for emit_idx, f in candidates:
+        lo, hi = f.cell_x_range
+        if lo <= cx <= hi:
+            return emit_idx     # exact bbox match
+        d = min(abs(cx - lo), abs(cx - hi))
+        if d < best_dist:
+            best_dist = d
+            best_emit = emit_idx
+    return best_emit
 
 
 def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     """Write a curated `<key>.json` for one merge key. Returns the path."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ----- Per-world floor renumbering -----------------------------------
-    # KeyAgg.cells_by_floor / floors_meta / agg.actors[*].floor are all
-    # internally keyed by world_id (or a negative legacy sentinel).  At
-    # emit time we pick a deterministic 1..N ordering and translate.
-    floor_remap, sorted_floor_keys = _build_floor_remap(agg)
+    # ----- Floor layout (per-world buckets, optionally cluster-split) ----
+    # KeyAgg.cells_by_floor is internally keyed by world_id (or a
+    # negative legacy sentinel).  _build_floor_layout splits any bucket
+    # whose cells form 2+ spatially-disjoint clusters into separate
+    # logical floors -- handles undercity sub-rooms that share a
+    # world_id (e.g. BugCave_03 hub vs BugCave_03 boss room).
+    floors = _build_floor_layout(agg)
+    actor_lookup = _build_actor_floor_lookup(floors, agg.grid_resolution)
 
-    # Compute bbox + per-floor cell rows.  We iterate sorted_floor_keys
-    # rather than agg.cells_by_floor so the emitted floor numbers are
-    # stable even for floors that exist only in floors_meta (no cells
-    # captured yet).
+    # Compute bbox + per-floor cell rows.
     bbox = None
     cells_out_by_floor: dict[str, list[list[int]]] = {}
-    for wkey in sorted_floor_keys:
-        emit_idx = floor_remap[wkey]
-        cells = agg.cells_by_floor.get(wkey) or {}
+    for emit_idx, f in enumerate(floors, start=1):
         rows: list[list[int]] = []
-        for (cx, cy), agg_cell in cells.items():
+        for (cx, cy), agg_cell in f.cells.items():
             rows.append([
                 cx, cy,
                 1 if agg_cell.is_walkable else 0,
@@ -741,16 +916,16 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     MOBILE_KINDS = {'boss', 'champion'}
 
     actors_out: list[dict] = []
-    # Cluster bucket: (skin, sno_id, world_key) -> list[ActorAgg].
-    # We group by the internal world_key (same as agg.actors keys), then
-    # translate to emit-floor at the end -- ensures cluster identity
-    # follows world identity, not whatever floor number any session
-    # happened to assign.
+    # Cluster bucket: (skin, sno_id, emit_floor) -> list[ActorAgg].
+    # Group by the actor's resolved EMIT floor (after cluster split),
+    # not its raw world_key -- two physically-separate boss rooms with
+    # the same world_id need their bosses kept apart, not centroided
+    # together to a meaningless midpoint between rooms.
     mobile_clusters: dict[tuple, list[ActorAgg]] = {}
     for _key, a in agg.actors.items():
-        emit_floor = floor_remap.get(a.floor, a.floor)
+        emit_floor = _emit_floor_for_actor(a, floors, actor_lookup, agg.grid_resolution)
         if a.kind in MOBILE_KINDS and a.sno_id is not None:
-            mobile_clusters.setdefault((a.skin, a.sno_id, a.floor), []).append(a)
+            mobile_clusters.setdefault((a.skin, a.sno_id, emit_floor), []).append(a)
         else:
             d = {
                 'skin': a.skin,
@@ -771,7 +946,7 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
     # (e.g. an elite that didn't move much, or a boss observed once)
     # behave identically to a pass-through emission -- the loop is
     # safe to use uniformly.
-    for (skin, sno_id, world_key), entries in mobile_clusters.items():
+    for (skin, sno_id, emit_floor), entries in mobile_clusters.items():
         # Observation-weighted centroid.  Falls back to a uniform
         # average when total weight is 0 (shouldn't happen, but cheap
         # to handle defensively).
@@ -813,7 +988,7 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
             'skin': skin,
             'kind': ex0.kind,
             'x': round(wx, 1), 'y': round(wy, 1), 'z': round(wz, 1),
-            'floor': floor_remap.get(world_key, world_key),
+            'floor': emit_floor,
             'sessions_seen': len(sessions_seen),
             'total_observations': total_obs,
         }
@@ -833,19 +1008,29 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
 
     saturated, sat_info = is_saturated(agg)
 
-    # Per-floor diagnostic block.  Translated through floor_remap so it
-    # lines up with cells_out_by_floor's keys (the renumbered 1..N
-    # emit-floor indices).  agg.floors_meta is keyed by world_id
-    # internally; we drop that internal key and only surface the
-    # emit-floor index, the world name(s), and the world_id list.
+    # Per-floor diagnostic block.  Iterates the cluster-split layout
+    # so a single world_key that produced N split floors gets N
+    # entries with the SAME world_id list (correct -- they share a
+    # world_id) but distinct emit floor numbers.  Surfaces a
+    # 'split_of' field when this floor is one of multiple clusters
+    # of the same world_key, so a viewer can flag "this is room 2
+    # of 2 sub-areas with the same world_id".
     floors_meta_out: dict[str, dict] = {}
-    for wkey, fm in agg.floors_meta.items():
-        emit_idx = floor_remap.get(wkey, wkey)
-        floors_meta_out[str(emit_idx)] = {
-            'worlds':        sorted(fm.worlds),
-            'world_ids':     sorted(fm.world_ids),
-            'sessions':      len(fm.sessions),
+    # Count clusters per world_key so we know which entries are splits.
+    clusters_per_wkey: dict[int, int] = collections.Counter(f.world_key for f in floors)
+    for emit_idx, f in enumerate(floors, start=1):
+        entry = {
+            'worlds':    sorted(f.worlds),
+            'world_ids': sorted(f.world_ids),
+            'sessions':  len(f.sessions),
         }
+        if clusters_per_wkey[f.world_key] > 1:
+            # Diagnostic: this is one of N split clusters of a single
+            # world_key.  cluster_idx is 0-based internally; surface
+            # 1-based for human readability.
+            entry['split_of'] = clusters_per_wkey[f.world_key]
+            entry['split_idx'] = f.cluster_idx + 1
+        floors_meta_out[str(emit_idx)] = entry
 
     payload = {
         'schema_version': SCHEMA_VERSION_SUPPORTED,
@@ -1172,20 +1357,23 @@ def emit_actor_index(out_dir: Path, state: dict[str, KeyAgg]) -> Path:
     by_skin: dict[str, list] = collections.defaultdict(list)
     by_kind: dict[str, list] = collections.defaultdict(list)
     for key, agg in state.items():
-        # Translate each agg's internal world-keyed actor floors into the
-        # same 1..N emit indices that emit_curated uses.  Without this,
-        # the actor index would surface raw world_ids (32-bit hashes)
-        # in the 'floor' field, breaking any consumer that joins it
-        # against the per-zone JSON's grid.floors map.
-        floor_remap, _ = _build_floor_remap(agg)
+        # Use the same layout emit_curated does so per-zone JSONs and
+        # the universal index agree on which actor lands on which
+        # emit floor (especially important when a world_key got
+        # cluster-split into multiple floors -- the actor's floor
+        # number depends on which cluster its position falls in).
+        floors_layout = _build_floor_layout(agg)
+        actor_lookup  = _build_actor_floor_lookup(floors_layout, agg.grid_resolution)
         for entry in agg.actors.values():
+            emit_floor = _emit_floor_for_actor(
+                entry, floors_layout, actor_lookup, agg.grid_resolution)
             row_skin = {
                 'key':    key,
                 'kind':   entry.kind,
                 'x':      entry.x,
                 'y':      entry.y,
                 'z':      entry.z,
-                'floor':  floor_remap.get(entry.floor, entry.floor),
+                'floor':  emit_floor,
                 'sessions_seen': len(entry.sessions_seen),
             }
             by_skin[entry.skin].append(row_skin)
