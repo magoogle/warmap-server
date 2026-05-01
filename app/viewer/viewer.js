@@ -653,13 +653,16 @@ async function refreshLiveZones() {
     try {
         const r = await getJSON('/live-zones');
         const next = r.zones || {};
-        // Only re-render when the *set* of live keys changes (or any
-        // count flipped).  Avoids the whole zone list re-painting every
-        // 5s on a server with steady live data.
+        // Only re-render when the *set* of live keys changes (or the
+        // displayed count -- distinct uploaders -- changes for any
+        // existing key).  Avoids the whole zone list re-painting every
+        // 5s on a server with steady live data.  We deliberately don't
+        // diff in_progress here because the badge no longer shows it:
+        // a partial-file flicker shouldn't repaint the sidebar.
         const oldKeys = Object.keys(S.liveZones).sort().join('|');
         const newKeys = Object.keys(next).sort().join('|');
-        const oldCounts = Object.entries(S.liveZones).map(([k, v]) => `${k}:${v.in_progress}`).sort().join('|');
-        const newCounts = Object.entries(next).map(([k, v]) => `${k}:${v.in_progress}`).sort().join('|');
+        const oldCounts = Object.entries(S.liveZones).map(([k, v]) => `${k}:${v.uploaders || 1}`).sort().join('|');
+        const newCounts = Object.entries(next).map(([k, v]) => `${k}:${v.uploaders || 1}`).sort().join('|');
         S.liveZones = next;
         if (oldKeys !== newKeys || oldCounts !== newCounts) renderZoneList();
     } catch {}
@@ -739,8 +742,18 @@ function renderZoneList() {
             // LIVE indicator: pulsing dot + count.  Inserted only when
             // /live-zones reports an in-progress session for this key
             // (filtered to last_active >= now-300s server-side, so we
-            // can trust the presence here).  Tooltip shows uploader
-            // count + how recently the last sample landed.
+            // can trust the presence here).
+            //
+            // The number on the badge is the count of distinct
+            // UPLOADERS (people) -- NOT the count of in-progress
+            // session files.  One person can easily produce several
+            // partial files in the same zone (every zone re-entry
+            // opens a new file; stale partials from previous game
+            // crashes keep getting re-uploaded every cycle and stay
+            // "fresh" via mtime).  Counting files made the badge
+            // misleading -- LIVE x4 with one person looked like four
+            // people were there.  Counting uploaders matches the
+            // user's mental model: "is anyone in this zone right now".
             const live = S.liveZones && S.liveZones[key];
             if (live) {
                 const badge = document.createElement('span');
@@ -750,17 +763,17 @@ function renderZoneList() {
                 badge.appendChild(dot);
                 const lbl = document.createElement('span');
                 lbl.className = 'live-label';
-                // Count -- usually 1, but show explicit number when
-                // multiple uploaders are simultaneously in this zone
-                // (rare but possible during synchronous group play).
-                lbl.textContent = live.in_progress > 1
-                    ? `LIVE x${live.in_progress}`
+                const uploaderCount = live.uploaders || 1;
+                lbl.textContent = uploaderCount > 1
+                    ? `LIVE x${uploaderCount}`
                     : 'LIVE';
                 badge.appendChild(lbl);
+                // Tooltip surfaces the file-count detail for diagnostics
+                // without putting it on the badge itself.
                 badge.title =
-                    `Active recording: ${live.in_progress} session${live.in_progress === 1 ? '' : 's'} ` +
-                    `from ${live.uploaders} uploader${live.uploaders === 1 ? '' : 's'} ` +
-                    `(last sample ${prettyAgo(live.last_active)})`;
+                    `${uploaderCount} uploader${uploaderCount === 1 ? '' : 's'} recording here ` +
+                    `(${live.in_progress} in-progress session${live.in_progress === 1 ? '' : 's'}, ` +
+                    `last sample ${prettyAgo(live.last_active)})`;
                 li.appendChild(badge);
                 li.classList.add('has-live');
             }
