@@ -1104,21 +1104,55 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
 
     # ---- Navigation-only companion (`<key>.nav.json`) -------------------
     # Tailored for the WarPath plugin's actual needs.  The full file
-    # (used by the viewer) carries per-cell vote metadata (conf, total)
-    # plus blocked cells -- noise from a navigation-runtime POV.
-    # The nav variant strips all of that:
+    # (used by the viewer) carries everything the viewer renders.
+    # The nav variant strips noise:
     #
-    #   * walkable cells only -- non-walkable get dropped entirely
-    #   * each cell encoded as [cx, cy] (no walkable flag, no conf,
-    #     no vote count)
-    #   * floors_meta + actors + zone-level keys (worlds/world_ids/
-    #     activity_kinds/etc.) preserved so WarPath gets everything
-    #     it needs from a single fetch
+    #   * cells:   walkable only, encoded as [cx, cy] (no walkable
+    #              flag, no conf, no vote count)
+    #   * actors:  filtered to navigation DESTINATIONS only --
+    #              chests, bosses, altars, portals, vendors, etc.
+    #              Loot drops (item / item_legendary / item_unique)
+    #              and threats (elite / champion) are dropped --
+    #              they're noise for "take me to X" queries.  Each
+    #              actor entry slimmed to the fields a path
+    #              caller actually reads (skin, kind, sno_id,
+    #              x/y/z/floor).
+    #   * other top-level fields preserved (worlds, world_ids,
+    #     floors_meta, activity_kinds, etc.).
     #
-    # Result: ~40-60% smaller than the full JSON, ~10x larger than
-    # the meta variant.  WarPath fetches it instead of the full
-    # .json on its lazy-cells path; viewer keeps using the full
-    # .json so blocked cells render correctly.
+    # Result: ~40-70% smaller than the full JSON.  WarPath fetches
+    # it instead of the full .json on its lazy-cells path; the
+    # viewer keeps using the full .json so blocked cells +
+    # threat/item markers still render correctly.
+    NAV_ACTOR_KINDS = {
+        # Loot containers
+        'chest', 'chest_helltide_random', 'chest_helltide_silent',
+        'chest_helltide_targeted',
+        # Boss spawn points
+        'boss',
+        # Altars + buff sources
+        'shrine', 'pyre', 'well',
+        # Hordes pylons
+        'pylon', 'aether_structure',
+        # Travel / transitions
+        'portal', 'portal_town', 'portal_helltide',
+        'dungeon_entrance', 'pit_exit', 'pit_floor_portal',
+        'undercity_exit', 'traversal', 'waypoint', 'horde_gate',
+        # Quest objectives
+        'objective', 'enticement', 'glyph_gizmo',
+        # NPCs you'd actually pathfind to
+        'npc_vendor', 'warplans_vendor', 'tyrael',
+        'bounty_npc', 'mercenary',
+        # Activity-specific obelisks
+        'pit_obelisk', 'undercity_obelisk',
+        # Resource nodes
+        'ore', 'herb',
+        # Town infrastructure
+        'stash', 'gizmo',
+    }
+    NAV_ACTOR_FIELDS = ('skin', 'kind', 'sno_id', 'type_id',
+                        'x', 'y', 'z', 'floor')
+
     nav_payload = dict(payload)
     nav_grid    = dict(payload['grid'])
     nav_floors  = {}
@@ -1128,6 +1162,14 @@ def emit_curated(out_dir: Path, agg: KeyAgg) -> Path:
         nav_floors[fid] = [[c[0], c[1]] for c in cells if c[2]]
     nav_grid['floors'] = nav_floors
     nav_payload['grid'] = nav_grid
+    # Filter + slim the actors list down to nav destinations.
+    nav_actors = []
+    for a in actors_out:
+        if a.get('kind') not in NAV_ACTOR_KINDS:
+            continue
+        slim = {k: a[k] for k in NAV_ACTOR_FIELDS if k in a}
+        nav_actors.append(slim)
+    nav_payload['actors'] = nav_actors
     nav_payload['cells_format'] = 'nav_walkable_only'
 
     nav_path = out_dir / f'{_safe_filename(agg.key)}.nav.json'
