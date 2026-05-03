@@ -1687,6 +1687,73 @@ def emit_actor_index(out_dir: Path, state: dict[str, KeyAgg]) -> Path:
     return path
 
 
+def emit_links_index(out_dir: Path, state: dict[str, KeyAgg]) -> Path:
+    """Universal cross-zone link graph: a single file aggregating every
+    `<key>.links.json`'s outbound_links into one structure keyed by
+    from-zone.
+
+    Why a global index instead of per-zone fetches: WarPath's planner
+    needs to run Dijkstra over the WHOLE graph to find a route, not
+    just one hop.  Fetching ~100 small files on plugin load is
+    slow + spammy on the server logs; one ~50-200 KB file (the merged
+    edge set is small) is one network round-trip and parses in a
+    couple of milliseconds in Lua.
+
+    Format:
+        {
+          'schema_version': 1,
+          'updated_at':     <epoch>,
+          'by_source': {
+            '<from_zone>': [
+              { 'to_zone': str,
+                'to_world': str|null,
+                'to_world_id': int|null,
+                'actor_skin': str,
+                'actor_kind': str,
+                'actor_sno': int|null,
+                'actor_x': float, 'actor_y': float, 'actor_z': float,
+                'actor_floor': int|null,
+                'count': int,
+                'first_seen': epoch,
+                'last_seen':  epoch,
+              },
+              ...
+            ],
+            ...
+          }
+        }
+    """
+    by_source: dict[str, list] = {}
+    for key, agg in state.items():
+        if not agg.outbound_links:
+            continue
+        # Sort each zone's edges descending by recency so the most
+        # frequently-used links float to the top -- the planner uses
+        # this as a tie-breaker when multiple edges go to the same
+        # destination.
+        edges = sorted(
+            agg.outbound_links.values(),
+            key=lambda e: (e.get('last_seen') or 0, e.get('count') or 0),
+            reverse=True,
+        )
+        by_source[key] = edges
+
+    payload = {
+        'schema_version': SCHEMA_VERSION_SUPPORTED,
+        'updated_at':     int(time.time()),
+        'by_source':      by_source,
+    }
+    path = out_dir / '_links_index.json'
+    tmp  = path.with_suffix('.json.tmp')
+    with tmp.open('w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=None, separators=(',', ':'))
+    os.replace(tmp, path)
+    # Pre-compress so the API can serve gzip directly.  Same shape as
+    # _actor_index.json which the existing _gzip_to handles.
+    _gzip_to(path, out_dir / '_links_index.json.gz')
+    return path
+
+
 def emit_all(state: dict[str, KeyAgg], data_dir: Path, sidecar_dir: Path,
              only_keys: Optional[set[str]] = None) -> None:
     """Write merged JSON files.
@@ -1729,6 +1796,8 @@ def emit_all(state: dict[str, KeyAgg], data_dir: Path, sidecar_dir: Path,
     print(f'  -> {cov}')
     idx = emit_actor_index(data_dir, state)
     print(f'  -> {idx}')
+    lnk = emit_links_index(data_dir, state)
+    print(f'  -> {lnk}')
 
     sidecar_dir.mkdir(parents=True, exist_ok=True)
     sat = emit_saturated(sidecar_dir, state)
