@@ -32,7 +32,21 @@ PUBLISHER="$(dirname "$0")/publish_zones.py"
 ENV_FILE="${WARMAP_ENV_FILE:-/opt/warmap/.env}"
 
 if [[ ! -d "$ZONES_DIR" ]]; then
+    # Most common cause: running as a non-root user.  Docker's volume
+    # path traversal requires root because intermediate dirs under
+    # /var/lib/docker/volumes are mode 701 (no group/other read,
+    # only execute) -- a non-root caller can't see anything past
+    # /var/lib/docker even though the leaf zones/ dir is 755.
+    if [[ $EUID -ne 0 ]] && [[ "$ZONES_DIR" == /var/lib/docker/* ]]; then
+        echo "ERROR: zones dir not visible to user '$(id -un)'." >&2
+        echo "  Path: $ZONES_DIR" >&2
+        echo "  Cause: docker volume mountpoint is root-only (mode 701)." >&2
+        echo "  Fix:  sudo $0 $*" >&2
+        exit 1
+    fi
     echo "ERROR: zones dir not found: $ZONES_DIR" >&2
+    echo "  If your docker volume lives elsewhere, override:" >&2
+    echo "    WARMAP_VOLUME=/your/path $0" >&2
     exit 1
 fi
 if [[ ! -f "$PUBLISHER" ]]; then
