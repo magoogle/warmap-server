@@ -1688,6 +1688,70 @@ def emit_actor_index(out_dir: Path, state: dict[str, KeyAgg]) -> Path:
     return path
 
 
+def emit_meta_index(out_dir: Path, state: dict[str, KeyAgg]) -> Path:
+    """Aggregated slim-meta index for fast bulk preload.
+
+    The WarPath plugin needs to know about every zone (cell counts per
+    floor, world_id, saturation, etc.) so it can answer "do we have
+    data for this zone?" instantly on zone-change.  Without preload
+    the plugin parses per-zone .meta.json on every change, which
+    stalls the game thread (Lua's pure-Lua JSON parser isn't fast).
+
+    This index lets the client GET ONE file at startup, parse it once,
+    and have everything in memory.  The file is reread by re-using the
+    on-disk per-zone .meta.json files emitted by emit_curated -- we
+    don't re-derive anything; just stitch them together verbatim.
+
+    Earlier draft stripped 'actors' to save ~5x bytes (most of a meta
+    file is its actor list).  Reverted: keeping actors means the Lua
+    preloader can answer pather.get_actors / nearest_actor queries
+    from memory IMMEDIATELY, without falling back to the global
+    _actor_index for the current-zone case.  ~1 MB gzipped is fine;
+    it's a one-time startup parse, never on a zone-change frame.
+
+    Format:
+        { schema_version, updated_at,
+          zones: { '<key>': <full_meta>, ... } }
+    where <full_meta> is the .meta.json payload as written by
+    emit_curated (cells already omitted; actors retained).
+    """
+    zones: dict[str, dict] = {}
+    skipped = 0
+    for key in state.keys():
+        meta_path = out_dir / f'{_safe_filename(key)}.meta.json'
+        try:
+            with meta_path.open('r', encoding='utf-8') as f:
+                meta = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            skipped += 1
+            continue
+        zones[key] = meta
+
+    if skipped:
+        print(f'  [meta_index] skipped {skipped} zones with unreadable .meta.json')
+
+    payload = {
+        'schema_version': SCHEMA_VERSION_SUPPORTED,
+        'updated_at':     int(time.time()),
+        'zones':          zones,
+    }
+    path = out_dir / '_meta_index.json'
+    tmp  = path.with_suffix('.json.tmp')
+    with tmp.open('w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=None, separators=(',', ':'))
+    os.replace(tmp, path)
+    # Pre-compress for the gzip-fast-path on the API side.  Same shape
+    # of inline gzip block as emit_links_index.
+    gz_path = out_dir / '_meta_index.json.gz'
+    gz_tmp  = gz_path.with_suffix('.gz.tmp')
+    with gz_tmp.open('wb') as gf:
+        with gzip.GzipFile(fileobj=gf, mode='wb', mtime=0, compresslevel=6) as gz:
+            with path.open('rb') as src:
+                gz.write(src.read())
+    os.replace(gz_tmp, gz_path)
+    return path
+
+
 def emit_links_index(out_dir: Path, state: dict[str, KeyAgg]) -> Path:
     """Universal cross-zone link graph: a single file aggregating every
     `<key>.links.json`'s outbound_links into one structure keyed by
@@ -1809,6 +1873,10 @@ def emit_all(state: dict[str, KeyAgg], data_dir: Path, sidecar_dir: Path,
     print(f'  -> {idx}')
     lnk = emit_links_index(data_dir, state)
     print(f'  -> {lnk}')
+    # _meta_index reuses the per-zone .meta.json files emit_curated
+    # just wrote, so it MUST run after the per-zone emit loop.
+    mi = emit_meta_index(data_dir, state)
+    print(f'  -> {mi}')
 
     sidecar_dir.mkdir(parents=True, exist_ok=True)
     sat = emit_saturated(sidecar_dir, state)

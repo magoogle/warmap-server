@@ -839,6 +839,42 @@ def get_actor_index(request: Request,
     return FileResponse(p, media_type='application/json')
 
 
+@app.get('/meta-index')
+@_LIMITER.limit('120/minute')
+def get_meta_index(request: Request,
+                   x_warmap_key: Optional[str] = Header(default=None, alias='X-WarMap-Key')):
+    """Aggregated slim-meta index -- one file with every zone's
+    .meta.json content (minus the actors array, which lives in
+    /actor-index already) so a client can preload its in-memory
+    zone catalog with a single round-trip instead of 100+ per-zone
+    GETs.
+
+    Consumed by WarPath's preloader to make zone-change parse-free.
+
+    Same conditional-GET + gzip pre-compress treatment as
+    /actor-index and /links-index.
+    """
+    _check_auth(x_warmap_key, allowed_tiers=_TIERS_READ)
+    p = DATA_DIR / '_meta_index.json'
+    if not p.exists():
+        raise HTTPException(404, 'No merge has run yet.')
+
+    accept = (request.headers.get('accept-encoding') or '').lower()
+    if 'gzip' in accept:
+        gz = p.with_suffix('.json.gz')
+        if gz.exists():
+            try:
+                if gz.stat().st_mtime >= p.stat().st_mtime:
+                    return _conditional_file_response(
+                        gz, request,
+                        media_type='application/json',
+                        content_encoding='gzip',
+                    )
+            except OSError:
+                pass
+    return _conditional_file_response(p, request, media_type='application/json')
+
+
 @app.get('/links-index')
 @_LIMITER.limit('120/minute')
 def get_links_index(request: Request,
