@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import gzip
 import json
 import math
 import os
@@ -1748,9 +1749,19 @@ def emit_links_index(out_dir: Path, state: dict[str, KeyAgg]) -> Path:
     with tmp.open('w', encoding='utf-8') as f:
         json.dump(payload, f, indent=None, separators=(',', ':'))
     os.replace(tmp, path)
-    # Pre-compress so the API can serve gzip directly.  Same shape as
-    # _actor_index.json which the existing _gzip_to handles.
-    _gzip_to(path, out_dir / '_links_index.json.gz')
+    # Pre-compress so the API can serve gzip directly.  Inlined here
+    # because emit_curated's _gzip_to is closure-scoped (defined inside
+    # that function so it can capture per-emit state); we don't need
+    # those captures for an index-level emit.  mtime=0 makes the .gz
+    # bytewise reproducible for unchanged JSON, which preserves
+    # ETag/If-Modified-Since hits for clients on no-change cycles.
+    gz_path = out_dir / '_links_index.json.gz'
+    gz_tmp  = gz_path.with_suffix('.gz.tmp')
+    with gz_tmp.open('wb') as gf:
+        with gzip.GzipFile(fileobj=gf, mode='wb', mtime=0, compresslevel=6) as gz:
+            with path.open('rb') as src:
+                gz.write(src.read())
+    os.replace(gz_tmp, gz_path)
     return path
 
 
